@@ -1,0 +1,58 @@
+{
+  "protocol_context": "Термостенд",
+  "packet_origin": "generated_packet_fixtures",
+  "application_bytes": "real_tcp_socket_exchanges",
+  "capture_clock": "modeled_UTC_timeline",
+  "files": {
+    "research/01_configuration.pcap": {
+      "sessions": 2,
+      "actions": 14
+    },
+    "research/02_variations.pcapng": {
+      "sessions": 1,
+      "actions": 15
+    },
+    "research/03_combined_messages.pcap": {
+      "sessions": 1,
+      "actions": 8
+    },
+    "additional/04_new_observations.pcapng": {
+      "sessions": 1,
+      "actions": 8
+    }
+  },
+  "diagnostics": [
+    {
+      "file": "diagnostics/01_retransmission.pcap",
+      "condition": "same_bytes_retransmission"
+    },
+    {
+      "file": "diagnostics/02_reordered.pcapng",
+      "condition": "reordered_packets"
+    },
+    {
+      "file": "diagnostics/03_missing_segment.pcap",
+      "condition": "missing_segment"
+    },
+    {
+      "file": "diagnostics/04_snaplen_truncated.pcapng",
+      "condition": "capture_truncated"
+    },
+    {
+      "file": "diagnostics/05_conflicting_overlap.pcap",
+      "condition": "conflicting_overlap"
+    },
+    {
+      "file": "diagnostics/06_missing_beginning.pcapng",
+      "condition": "missing_connection_beginning"
+    },
+    {
+      "file": "diagnostics/07_checksum_offload.pcap",
+      "condition": "partial_pseudoheader_checksum"
+    },
+    {
+      "file": "diagnostics/08_bad_checksum.pcapng",
+      "condition": "invalid_checksum"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "protocol-lab-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcap-parser = "0.17"
+etherparse = "0.19"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+sha2 = "0.10"

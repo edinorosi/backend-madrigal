@@ -1,0 +1,11 @@
+[package]
+name = "protocol-lab-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+protocol-lab-core = { path = "../core" }
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4"] } # <-- Добавили это
