@@ -25,10 +25,7 @@ impl FieldType {
         }
     }
 }
-
-/// Применяет правило к срезу байт (срез уже смещён вызывателем).
-/// Возвращает JSON-значение вида {"name":..,"offset":..,"length":..,"value":..}
-/// или None если байт не хватает.
+//применяем правило к данным
 pub fn apply_rule(data: &[u8], rule: &InterpretationRule) -> Option<serde_json::Value> {
     let size = rule.field_type.size();
     if data.len() < size {
@@ -47,4 +44,45 @@ pub fn apply_rule(data: &[u8], rule: &InterpretationRule) -> Option<serde_json::
         "length": size,
         "value": value,
     }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FramingRule {
+    FizedSize(usize), //у сообщ фикс размер
+    LengthPrefixed, //первый байт= размер тела
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub stream_offset: usize,
+    pub payload: Vec<u8>, 
+}
+
+
+pub fn frame_stream(data: &[u8], rule:&FramingRule)-> Vec<Message> {
+    let mut messages = Vec::new();
+    let mut offset = 0;
+
+    while offset < data.len() {
+        match rule {
+            FramingRule::FizedSize(size) => {
+                //Если используется правило фикс размер то эта херня
+                if offset + size > data.len() { break; }
+                let payload = data[offset..offset + size].to_vec(); // удаляем крайнюю плоть
+                messages.push(Message {stream_offset: offset, payload});
+                offset += size;
+            }
+            //Длина в начале ,а не в конче
+            FramingRule::LengthPrefixed => {
+                if offset + 1 > data.len() {break; }
+                let len = data[offset] as usize;
+                if offset + 1 + len > data.len() {break; }
+                let payload = data[offset + 1..offset + 1 + len].to_vec(); //кастрация 
+                messages.push(Message {stream_offset: offset, payload});
+                offset += 1 + len;
+
+            }
+        }
+    }
+    messages
 }
