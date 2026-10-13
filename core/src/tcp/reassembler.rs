@@ -40,7 +40,7 @@ impl TcpReassembler {
                 let new_data = &packet.payload[overlap_start..];
                 chunks.push(StreamChunk::Data {
                     flow_offset,
-                    lenght: new_data.len(),
+                    length: new_data.len(),
                     packet_index: packet.index
                 }); //добавили новый чанк (дополнение прошлого)
 
@@ -51,7 +51,7 @@ impl TcpReassembler {
 
             chunks.push(StreamChunk::Data {
                 flow_offset,
-                lenght: packet.payload.len(),
+                length: packet.payload.len(),
                 packet_index: packet.index
             });
             flow_offset += packet.payload.len();

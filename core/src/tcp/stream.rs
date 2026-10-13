@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum StreamChunk {
     Data {
         flow_offset: usize,
-        lenght: usize,
+        length: usize,
         packet_index: usize,
     },
     Gap {   

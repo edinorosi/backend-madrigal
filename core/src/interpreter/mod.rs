@@ -48,7 +48,7 @@ pub fn apply_rule(data: &[u8], rule: &InterpretationRule) -> Option<serde_json::
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FramingRule {
-    FizedSize(usize), //у сообщ фикс размер
+    FixedSize(usize), //у сообщ фикс размер
     LengthPrefixed, //первый байт= размер тела
 }
 
@@ -65,7 +65,7 @@ pub fn frame_stream(data: &[u8], rule:&FramingRule)-> Vec<Message> {
 
     while offset < data.len() {
         match rule {
-            FramingRule::FizedSize(size) => {
+            FramingRule::FixedSize(size) => {
                 //Если используется правило фикс размер то эта херня
                 if offset + size > data.len() { break; }
                 let payload = data[offset..offset + size].to_vec(); // удаляем крайнюю плоть

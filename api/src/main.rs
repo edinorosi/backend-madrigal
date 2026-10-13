@@ -1,14 +1,44 @@
 use axum::{
-    routing::post,
+    routing::{get, post},
     Router,
     Json,
-    extract::Path as AxumPath,
+    extract::{Path as AxumPath, State, Multipart},
+    response::{Response, IntoResponse},
+    body::Body,
+    http::{StatusCode, header},
 };
+use axum::response::sse::{Event, KeepAlive, Sse};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use std::convert::Infallible;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 use std::path::Path as StdPath;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use tower_http::cors::{Any, CorsLayer};
+use tar::Builder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 use protocol_lab_core::tcp::stream::StreamChunk;
 use protocol_lab_core::interpreter::{apply_rule, InterpretationRule, FieldType, FramingRule, frame_stream};
+
+// --- СОСТОЯНИЕ ПРИЛОЖЕНИЯ ---
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub file_path: Option<String>,
+    pub observations: Vec<serde_json::Value>,
+}
+
+pub struct AppData {
+    pub projects: RwLock<HashMap<String, Project>>,
+}
+
+// ВАЖНО: Здесь должно быть AppData, а не AppState, чтобы не было цикла!
+pub type AppState = Arc<AppData>;
 
 async fn get_flow_bytes(
     AxumPath(session_id): AxumPath<String>,
@@ -38,7 +68,7 @@ async fn get_flow_bytes(
 
     let result: Vec<serde_json::Value> = chunks.into_iter().map(|chunk| {
         match chunk {
-            StreamChunk::Data { flow_offset, lenght, packet_index } => {
+            StreamChunk::Data { flow_offset, length, packet_index } => {
                 let hex_data = match session.packets.iter().find(|p| p.index == packet_index) {
                     Some(pkt) => pkt.payload.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" "),
                     None => format!("ERR: global packet_index {} not found", packet_index),
@@ -47,7 +77,7 @@ async fn get_flow_bytes(
                 json!({
                     "type": "data",
                     "offset": flow_offset,
-                    "length": lenght,
+                    "length": length,
                     "packet_index": packet_index,
                     "hex": hex_data
                 })
@@ -66,6 +96,15 @@ async fn get_flow_bytes(
     Json(json!({"flow": "client_to_server", "chunks": result}))
 }
 
+
+#[derive(serde::Deserialize, Debug)]
+struct JournalEntry {
+    timestamp: String,
+    action: String,
+    parameter: Option<String>,
+}
+
+
 async fn apply_interpretation(
     Json(body): Json<serde_json::Value>
 ) -> Json<serde_json::Value> {
@@ -73,11 +112,11 @@ async fn apply_interpretation(
     let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
     let framing_rule = match framing_str {
         "length_prefixed" => FramingRule::LengthPrefixed,
-        _ => FramingRule::FizedSize(framing_size),
+        _ => FramingRule::FixedSize(framing_size),
     };
     let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
     let session_idx: usize = body["session_id"].as_u64().unwrap_or(0) as usize;
-    let offset: usize = body["offset"].as_u64().unwrap_or(0) as usize;
+    let _offset: usize = body["offset"].as_u64().unwrap_or(0) as usize;
 
     let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
     let rule_type_str = body["rule"]["type"].as_str().unwrap_or("u8");
@@ -89,7 +128,7 @@ async fn apply_interpretation(
 
     let rule = InterpretationRule {
         name: rule_name.to_string(),
-        offset: 0,
+        offset: rule_offset,
         field_type,
     };
 
@@ -107,20 +146,36 @@ async fn apply_interpretation(
 
     let (flow_c2s, _) = protocol_lab_core::pcap::session::split_into_flows(session);
     let chunks = protocol_lab_core::tcp::reassembler::TcpReassembler::reassemble(&flow_c2s.packets);
+    let mut gap_offsets: Vec<usize> = Vec::new();
 
     let mut clean_bytes: Vec<u8> = Vec::new();
     for chunk in &chunks {
-        if let StreamChunk::Data { packet_index, .. } = chunk {
-            if let Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
-                clean_bytes.extend_from_slice(&pkt.payload);
+        match chunk {
+            StreamChunk::Data { packet_index, ..} => {
+                if let Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
+                    clean_bytes.extend_from_slice(&pkt.payload);
+                } 
             }
+            StreamChunk::Gap { flow_offset, .. } => {
+                gap_offsets.push(*flow_offset);
+            }
+            _ => {} //игнорируем анонимных
         }
     }
     
     //режем поток на сообщ по законам Шариата(Framing_Rule)
     let messages = frame_stream(&clean_bytes, &framing_rule);
     let results: Vec<serde_json::Value> = messages.into_iter().map(|msg|{  //проходим по сообщению (1...8(развернуть на 90 градусов) аят) отсекаем  неверных
-        match apply_rule(&msg.payload, &rule) {
+        let is_after_gap = gap_offsets.iter().any(|&gap_off| msg.stream_offset >= gap_off);
+        if is_after_gap { //сообщение после дырки
+            return json!({
+                "stream_offset": msg.stream_offset,
+                "success": false,
+                "error": "Data after TCP Gap (unreliable)",
+                "type": "incomplete"
+            });
+        }
+        match apply_rule(&msg.payload, &rule) { //пробуем применять правила 
             Some(parsed) => json!({
                 "stream_offset": msg.stream_offset,
                 "success": true,
@@ -133,7 +188,8 @@ async fn apply_interpretation(
             }),
         }
     }).collect();
-//платим по долгам
+
+    //платим по долгам
     Json(json!({
         "total_messages": results.len(),
         "results": results
@@ -143,171 +199,392 @@ async fn apply_interpretation(
 //дал-дал ушел()
 async fn verify_corpus(
     Json(body): Json<serde_json::Value>
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
 
-    //выбиваем массив путей к писи файлам из джейсона
-    let files = match body["files"].as_array() {
-        Some(arr) => arr,
-        None => return Json(json!({"error": "files array required"})),
+    let files = match body["files"].as_array() { //пирсинг файлов входных
+        Some(arr) => arr.clone(),
+        None => return Json(json!({"error": "files array required"})).into_response(),
     };
-    //выlhfxbdftv правило из пальца
+    
     let framing_str = body["framing"]["type"].as_str().unwrap_or("fixed");
     let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
-
-
-    //превращаем деревенского джейсона в пгт-фермера с рулькой
     let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
     let rule_type_str = body["rule"]["type"].as_str().unwrap_or("u8");
     let rule_offset = body["rule"]["offset"].as_u64().unwrap_or(0) as usize;
-    let framing_rule = match framing_str {
+    let expected_value = body["expected_value"].as_str().map(|s| s.to_string());
+
+    let journal_path = body["journal_path"].as_str().map(|s| s.to_string());
+    let mut journal_entries: Vec<serde_json::Value> = Vec::new();
+    if let Some(j_path) = journal_path {
+        if let Ok(mut rdr) = csv::Reader::from_path(&j_path) {
+            for result in rdr.deserialize() {
+                if let Ok(record) = result {
+                    journal_entries.push(record);
+                }
+            }
+        }
+    }
+
+    let framing_rule = match framing_str {  //правила 
         "length_prefixed" => FramingRule::LengthPrefixed,
-        _ => FramingRule::FizedSize(framing_size),
+        _ => FramingRule::FixedSize(framing_size),
     };
-
-
-    //стринги для фоеймтеймера типок
+    
     let field_type = match rule_type_str {
         "u16_big" => FieldType::U16Big,
-        _=> FieldType::U8,
+        _ => FieldType::U8,
     };
 
-    //законы интерпритации
     let rule = InterpretationRule {
         name: rule_name.to_string(),
         offset: rule_offset,
         field_type,
     };
 
-    let expected_value = body["expected_value"].as_str().map(|s| s.to_string());
-    //слишком очевидно чтоб что то писать или писать
-    let mut total_messages = 0;
-    let mut success_count = 0;
-    let mut error_count = 0;
-    let mut counterexamples = Vec::new();
 
-    for file_val in files {
-        let file_path = match file_val.as_str() {
-            Some(p) => p,
-            None => continue,
-        };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>(); //готовим канал для стрима
 
 
-        let path = StdPath::new(file_path);
+    tokio::spawn(async move { //асинхронное фоновое выполнееи
+        let mut total_messages = 0;
+        let mut success_count = 0;
+        let mut error_count = 0;
+        let mut counterexamples = Vec::new();
 
-        //читаем писи
-        let packets = match protocol_lab_core::pcap::reader::read_pcap(path) {
-            Ok(p) => p,
-            Err(e) => {
-                counterexamples.push(json!({
-                    "file": file_path,
-                    "error": format!("Failed to read PCAP: {}", e) //18
-                }));
-                continue;
-            }
-        }; // запяточка -> ; 
+        let total_files = files.len();
 
-        //группируем их ребята
-        let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
+        for (file_idx, file_val) in files.iter().enumerate() {
+            let file_path = match file_val.as_str() {
+                Some(p) => p.to_string(),
+                None => continue,
+            };
 
-        for (session_idx, session) in sessions.iter().enumerate() {
-            let (flow_c2s, _) = protocol_lab_core::pcap::session::split_into_flows(session); // поделили на команды пока мы дули-дули
-            // собираем SCP 173
-            let chunks = protocol_lab_core::tcp::reassembler::TcpReassembler::reassemble(&flow_c2s.packets);
 
-            //теперь верные чистюли своему имаму
-            let mut clean_bytes: Vec<u8> = Vec::new();
-            for chunk in &chunks {
-                if let StreamChunk::Data { packet_index, ..} = chunk {
-                    if let  Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
-                        clean_bytes.extend_from_slice(&pkt.payload); //3 путя короч финальный аккорд
-                    }
+            let _ = tx.send(Ok(Event::default().data(&format!("Обработка файла {}/{}: {}", file_idx + 1, total_files, file_path)))); // отправка события типо что началась обработка файла
+
+            let path = StdPath::new(&file_path);
+            let packets = match protocol_lab_core::pcap::reader::read_pcap(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(Ok(Event::default().data(&format!("Ошибка чтения {}: {}", file_path, e))));
+                    continue;
                 }
-            } 
+            };
 
+            let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
+            let total_sessions = sessions.len();
 
-            let messages = frame_stream(&clean_bytes, &framing_rule);
+            for (session_idx, session) in sessions.iter().enumerate() {
+                
+                let _ = tx.send(Ok(Event::default().data(&format!("  Сессия {}/{}...", session_idx + 1, total_sessions)))); //
 
-            for msg in messages {
-                total_messages += 1;
+                let (flow_c2s, _) = protocol_lab_core::pcap::session::split_into_flows(session);
+                let chunks = protocol_lab_core::tcp::reassembler::TcpReassembler::reassemble(&flow_c2s.packets);
 
-                match apply_rule(&msg.payload, &rule) {
-                    Some(parsed) => {
-                        success_count += 1;
+                let mut clean_bytes: Vec<u8> = Vec::new();
+                let mut gap_offsets: Vec<usize> = Vec::new();
 
-                        if let Some(ref expected) = expected_value {
-                            if parsed["value"] != *expected {
-                                counterexamples.push(json!({
-                                    "file": file_path,
-                                    "session": session_idx,
-                                    "stream_offset": msg.stream_offset,
-                                    "expected": expected,
-                                    "actual": parsed["value"],
-                                    "type": "value_mismatch"
-                                }));
+                for chunk in &chunks {
+                    match chunk {
+                        StreamChunk::Data { packet_index, .. } => {
+                            if let Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
+                                clean_bytes.extend_from_slice(&pkt.payload);
                             }
                         }
+                        StreamChunk::Gap { flow_offset, .. } => {
+                            gap_offsets.push(*flow_offset);
+                        }
+                        _ => {}
+                    }
+                }
+
+                let messages = frame_stream(&clean_bytes, &framing_rule);
+
+                for msg in messages {
+                    total_messages += 1;
+
+                    let is_after_gap = gap_offsets.iter().any(|&gap_off| msg.stream_offset >= gap_off);
+                    if is_after_gap {
+                        counterexamples.push(json!({
+                            "file": file_path, 
+                            "session": session_idx, 
+                            "stream_offset": msg.stream_offset,
+                            "error": "Data after TCP Gap", 
+                            "type": "incomplete"
+                        }));
+                        continue;
                     }
 
-                    None => {
-                        //если на водку не хватило для прочитки аята
-                        error_count += 1;
-                        counterexamples.push(json!({
-                            "file": file_path,
-                            "session": session_idx,
-                            "stream_offset": msg.stream_offset,
-                            "error": "[5134]Not enough bytes in message",
-                            "type": "parse_error"
-                        }));
+                    match apply_rule(&msg.payload, &rule) {
+                        Some(parsed) => {
+                            success_count += 1;
+                            if let Some(ref expected) = expected_value {
+                                if parsed["value"] != *expected {
+                                    counterexamples.push(json!({
+                                        "file": file_path, 
+                                        "session": session_idx, 
+                                        "stream_offset": msg.stream_offset,
+                                        "expected": expected, 
+                                        "actual": parsed["value"], 
+                                        "type": "value_mismatch"
+                                    }));
+                                }
+                            }
+                        }
+                        None => {
+                            error_count += 1;
+                            counterexamples.push(json!({
+                                "file": file_path, 
+                                "session": session_idx, 
+                                "stream_offset": msg.stream_offset,
+                                "error": "Not enough bytes", 
+                                "type": "parse_error"
+                            }));
+                        }
                     }
                 }
             }
-
         }
-    }
 
-    Json(json!({
-        "total_messages": total_messages,
-        "succes_count": success_count,
-        "error_count": error_count,
-        "counterexamples": counterexamples
-    }))
+        // 4. Отправляем финальный результат
+        let final_result = json!({
+            "type": "done",
+            "total_messages": total_messages,
+            "success_count": success_count,
+            "error_count": error_count,
+            "journal": journal_entries
+        });
+        let _ = tx.send(Ok(Event::default().data(&final_result.to_string())));
+    });
 
+    // 5. Возвращаем SSE стрим
+    Sse::new(UnboundedReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 
-async fn create_project() -> Json<serde_json::Value> {
+async fn create_project(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let id = Uuid::new_v4().to_string();
-    Json(json!({ "id": id, "status": "created" }))
+    let name = body["name"].as_str().unwrap_or("Untitled Project").to_string();
+
+    let new_project = Project {
+        id: id.clone(),
+        name, 
+        file_path: None,
+        observations: Vec::new(),
+    };
+
+    state.projects.write().unwrap().insert(id.clone(), new_project);
+
+    Json(json!({ "id": id, "status": "created"}))
 }
 
-async fn upload_capture(
+//Священный эндпоинт
+async fn get_projects(
+    State(state): State<AppState> //state - это общая память со всеми проектами
+) -> Json<serde_json::Value>{
+    let project = state.projects.read().unwrap(); //мирное чтение (так как у нас был RwLock, мы аккуратно получили разрешение на чтение. Остальные могут тоже читать но не могут изменгять)
+    let list: Vec<serde_json::Value> = project.values().map(|p| { //
+        json!({"id": p.id, "name": p.name})
+    }).collect(); //Собираем в джейсона
+    Json(json!({"projects": list})) 
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>
+) -> Json<serde_json::Value>{
+    let projects = state.projects.read().unwrap();
+    match projects.get(&id) {
+        Some(p) => Json(json!(p)),
+        None => Json(json!({ "error": "Project not found" }))
+    }
+}
+
+async fn add_observation(
+    State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<serde_json::Value>
 ) -> Json<serde_json::Value> {
-    let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
-    let path = StdPath::new(file_path);
-
-    match protocol_lab_core::pcap::reader::read_pcap(path) {
-        Ok(packets) => {
-            let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
-            Json(json!({ 
-                "project_id": id, 
-                "packets_found": packets.len(),
-                "sessions_found": sessions.len() 
-            }))
-        }
-        Err(e) => Json(json!({ "error": e.to_string() }))
+    let mut projects = state.projects.write().unwrap(); //получаем все проекты из состояния
+    if let Some(project) = projects.get_mut(&id) { //поиск проекта по айди (get_mut - получанеие изменяемой ссылки (&mut))
+        project.observations.push(body); 
+        Json(json!({ "status": "saved", "total_observations": project.observations.len() }))
+    } else {
+        Json(json!({ "error": "Project not found" }))
     }
 }
 
+async fn generate_report( //мясо, наверное даже фарш. Генератор отчётов
+    Json(body): Json<serde_json::Value>
+) -> Response<Body> {
+    let project_name = body["project_name"].as_str().unwrap_or("Без названия");
+    let total = body["results"]["total_messages"].as_u64().unwrap_or(0);
+    let success = body["results"]["success_count"].as_u64().unwrap_or(0);
+    let errors = body["results"]["error_count"].as_u64().unwrap_or(0);
+
+    let mut md = String::new();
+    md.push_str(&format!("# Отчёт: {}\n\n", project_name));
+    md.push_str(&format!("- Всего: {}\n- Успешно: {}\n- Ошибок: {}\n\n", total, success, errors));
+
+    if let Some(examples) = body["results"]["counterexamples"].as_array() {
+        md.push_str("## Контрпримеры\n| Файл | Смещение | Ожидалось | Получено |\n|---|---|---|---|\n");
+        for ex in examples {
+            md.push_str(&format!("| {} | {} | {} | {} |\n", 
+                ex["file"].as_str().unwrap_or("-"),
+                ex["stream_offset"].as_u64().unwrap_or(0),
+                ex["expected"].as_str().unwrap_or("-"),
+                ex["actual"].as_str().unwrap_or("-")
+            ));
+        }
+    }
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/markdown")
+        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"report.md\"")
+        .body(Body::from(md))
+        .unwrap()
+}
+
+async fn upload_capture(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    mut form: Multipart 
+) -> Json<serde_json::Value> {
+    std::fs::create_dir_all("uploads").unwrap();
+    
+    let mut saved_file_path = String::from("uploads/unknown.pcap");
+
+    // Проходим по полям по полям синий трактор едет к нам
+    while let Ok(Some(field)) = form.next_field().await {
+        let file_name = field.file_name().unwrap_or("upload.pcap").to_string(); //деаноним имя файла
+        
+        let data = field.bytes().await.unwrap(); // записываем байты в дату переменную йо
+
+        saved_file_path = format!("uploads/{}", file_name); //генерируем путь истинный
+
+        std::fs::write(&saved_file_path, &data).unwrap(); // сохран
+    }
+
+    let path = StdPath::new(&saved_file_path);
+
+    match protocol_lab_core::pcap::reader::read_pcap(path) { //читаем файл пакетов с продуктами
+        Ok(packets) => {
+            let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets); //отденьно отсордировываем по группам пакеты чтобы не было мешанины
+
+            if let Ok(mut projects) = state.projects.write() {
+                if let Some(project) = projects.get_mut(&id){ //ищем конктреный проекти по его ID + блокируем запись
+                    project.file_path = Some(saved_file_path.clone());
+                }
+            }
+
+            Json(json!({
+                "project_id": id,
+                "packets_found": packets.len(),
+                "sessions_found": sessions.len(),
+                "saved_to": saved_file_path
+            }))
+        }
+        Err(e) => {
+            Json(json!({"error": format!("Ошибка чтения pcap: {}", e)}))
+        }
+    }
+}
+
+
+async fn export_project(
+    Json(body): Json<serde_json::Value>
+) -> Response<Body> {
+    let mut archive_buffer: Vec<u8> = Vec::new(); //готовим буфер куда туда сюда
+    
+    let gz_encoder = GzEncoder::new(&mut archive_buffer, Compression::default()); // Газан пишет в наш буфер 
+
+    let mut tar_builder = Builder::new(gz_encoder); // Тартар архиватор который пишет в газана
+
+    let rules_json = serde_json::to_vec_pretty(&body["rules"]) // json->красивые байты
+        .unwrap_or_default();
+
+    let mut rules_header = tar::Header::new_gnu();
+    rules_header.set_size(rules_json.len() as u64);
+    rules_header.set_mode(0o644);
+    tar_builder
+        .append_data(&mut rules_header, "rules.json", rules_json.as_slice())
+        .ok();
+
+    // Какой то манифест проекта
+    let manifest = json!({
+        "project_name": body["project_name"].as_str().unwrap_or("unnamed"),
+        "files": body["files"],
+        "expected_at": "2026-10-13T00:00:00Z"
+    });
+
+    let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
+    let mut manifest_header = tar::Header::new_gnu();
+    manifest_header.set_size(manifest_json.len() as u64);
+    manifest_header.set_mode(0o644);
+    tar_builder
+        .append_data(&mut manifest_header, "manifest.json", manifest_json.as_slice())
+        .ok();
+
+    // Добавляем писи-файлы в архив если всё норм
+    if let Some(files_arr) = body["files"].as_array() {
+        for file_val in files_arr {
+            if let Some(file_path) = file_val.as_str() {
+                let path = StdPath::new(file_path);
+                if path.exists() {
+                    let file_name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown.pcap");
+                    
+                    tar_builder.append_path_with_name(path, file_name).ok();
+                } else {
+                    eprintln!("[export] файл не найден, пропущен: {}", file_path);
+                }
+            }
+        }
+    }
+
+    // завершаем ритуал с архивом
+    let gz_encoder = tar_builder.into_inner().unwrap();
+    gz_encoder.finish().unwrap();
+
+
+    // чтобы у типа загрузка архива началась
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/gzip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"project.tar.gz\""
+        )
+        .body(Body::from(archive_buffer))
+        .unwrap()
+}
+
+
+
+
 #[tokio::main]
 async fn main() {
+    let state = Arc::new(AppData {
+        projects: RwLock::new(HashMap::new()),
+    });
+
+    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+
     let app = Router::new()
-        .route("/api/v1/projects", post(create_project))
+        .route("/api/v1/projects", post(create_project).get(get_projects))
+        .route("/api/v1/projects/:id", get(get_project))
         .route("/api/v1/projects/:id/captures", post(upload_capture))
+        .route("/api/v1/projects/:id/observations", post(add_observation))
         .route("/api/v1/flows/:session_id/bytes", post(get_flow_bytes))
         .route("/api/v1/interpret/apply", post(apply_interpretation))
-        .route("/api/v1/verify/corpus", post(verify_corpus)); 
+        .route("/api/v1/verify/corpus", post(verify_corpus))
+        .route("/api/v1/projects/export", post(export_project))
+        .route("/api/v1/report/generate", post(generate_report))
+        .layer(cors)
+        .with_state(state);
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("🚀 Сервер запущен на http://0.0.0.0:8080");
     axum::serve(listener, app).await.unwrap();
