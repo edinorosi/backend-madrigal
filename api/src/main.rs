@@ -73,7 +73,7 @@ async fn apply_interpretation(
     let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
     let framing_rule = match framing_str {
         "length_prefixed" => FramingRule::LengthPrefixed,
-        _ => FramingRule::FixedSize(framing_size),
+        _ => FramingRule::FizedSize(framing_size),
     };
     let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
     let session_idx: usize = body["session_id"].as_u64().unwrap_or(0) as usize;
@@ -81,7 +81,7 @@ async fn apply_interpretation(
 
     let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
     let rule_type_str = body["rule"]["type"].as_str().unwrap_or("u8");
-    let rule_offset = body["rule"]["offset"].as_u64().unwrap_or("0") as usize;
+    let rule_offset = body["rule"]["offset"].as_u64().unwrap_or(0) as usize;
     let field_type = match rule_type_str {
         "u16_big" => FieldType::U16Big,
         _ => FieldType::U8,
@@ -134,9 +134,9 @@ async fn apply_interpretation(
         }
     }).collect();
 //платим по долгам
-    Json(json({
+    Json(json!({
         "total_messages": results.len(),
-        "results": result
+        "results": results
     }))
 }
 
@@ -152,13 +152,17 @@ async fn verify_corpus(
     };
     //выlhfxbdftv правило из пальца
     let framing_str = body["framing"]["type"].as_str().unwrap_or("fixed");
-    let framing_size = bpdy["framing"]["size"].as_u64().unwrap_or(12) as usize;
+    let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
 
 
     //превращаем деревенского джейсона в пгт-фермера с рулькой
-    let rule_name = body["rule"]["name"].as_str().unknown_or("unknown");
-    let rule_type_str = body["rule"]["type"].as_str().unknown_or("u8");
+    let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
+    let rule_type_str = body["rule"]["type"].as_str().unwrap_or("u8");
     let rule_offset = body["rule"]["offset"].as_u64().unwrap_or(0) as usize;
+    let framing_rule = match framing_str {
+        "length_prefixed" => FramingRule::LengthPrefixed,
+        _ => FramingRule::FizedSize(framing_size),
+    };
 
 
     //стринги для фоеймтеймера типок
@@ -176,9 +180,9 @@ async fn verify_corpus(
 
     let expected_value = body["expected_value"].as_str().map(|s| s.to_string());
     //слишком очевидно чтоб что то писать или писать
-    let mut total_messages = 0
-    let mut success_count = 0
-    let mut error_count = 0
+    let mut total_messages = 0;
+    let mut success_count = 0;
+    let mut error_count = 0;
     let mut counterexamples = Vec::new();
 
     for file_val in files {
@@ -205,7 +209,7 @@ async fn verify_corpus(
         //группируем их ребята
         let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
 
-        for (session_idx, session) in session.iter().enumerate() {
+        for (session_idx, session) in sessions.iter().enumerate() {
             let (flow_c2s, _) = protocol_lab_core::pcap::session::split_into_flows(session); // поделили на команды пока мы дули-дули
             // собираем SCP 173
             let chunks = protocol_lab_core::tcp::reassembler::TcpReassembler::reassemble(&flow_c2s.packets);
@@ -231,14 +235,14 @@ async fn verify_corpus(
                         success_count += 1;
 
                         if let Some(ref expected) = expected_value {
-                            if parsed.valur != *expected {
+                            if parsed["value"] != *expected {
                                 counterexamples.push(json!({
                                     "file": file_path,
                                     "session": session_idx,
                                     "stream_offset": msg.stream_offset,
                                     "expected": expected,
-                                    "actual": parsed.value
-                                    "type": value_mismatch
+                                    "actual": parsed["value"],
+                                    "type": "value_mismatch"
                                 }));
                             }
                         }
@@ -251,7 +255,7 @@ async fn verify_corpus(
                             "file": file_path,
                             "session": session_idx,
                             "stream_offset": msg.stream_offset,
-                            "error": "[5134]Not enough bytes in message"
+                            "error": "[5134]Not enough bytes in message",
                             "type": "parse_error"
                         }));
                     }
@@ -263,9 +267,9 @@ async fn verify_corpus(
 
     Json(json!({
         "total_messages": total_messages,
-        "succes_count": succes_count,
+        "succes_count": success_count,
         "error_count": error_count,
-        "counterexamples" counterexamples
+        "counterexamples": counterexamples
     }))
 
 }
@@ -302,7 +306,7 @@ async fn main() {
         .route("/api/v1/projects", post(create_project))
         .route("/api/v1/projects/:id/captures", post(upload_capture))
         .route("/api/v1/flows/:session_id/bytes", post(get_flow_bytes))
-        .route("/api/v1/interpret/apply", post(apply_interpretation));
+        .route("/api/v1/interpret/apply", post(apply_interpretation))
         .route("/api/v1/verify/corpus", post(verify_corpus)); 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("🚀 Сервер запущен на http://0.0.0.0:8080");
