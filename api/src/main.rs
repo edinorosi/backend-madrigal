@@ -50,6 +50,95 @@ async fn list_captures(State(state): State<AppState>) -> Json<Vec<Capture>> {
     Json(list)
 }
 
+fn capture_dir(id: &str) -> String { 
+    format!("data/captures/{}", id) 
+} // папка одного capture
+
+fn save_json(path: &str, v: &impl serde::Serialize) { // запись любого стора в JSON
+
+    if let Some(p) = StdPath::new(path).parent() { 
+        std::fs::create_dir_all(p).ok(); 
+    } 
+
+    if let Ok(b) = serde_json::to_vec_pretty(v) { 
+        std::fs::write(path, b).ok(); 
+    }
+}
+
+
+fn persist_capture(state: &AppState, id: &str) { // сохранить один capture целиком
+    let dir = capture_dir(id);
+
+    if let Some(c) = state.captures.read().unwrap().get(id) { 
+        save_json(&format!("{}/meta.json", dir), c); 
+    } 
+
+    let sess: Vec<Session> = state.sessions
+        .read()
+        .unwrap()
+        .values()
+        .filter(|s| s.capture_id == id)
+        .cloned()
+        .collect(); // его сессии
+
+    save_json(&format!("{}/sessions.json", dir), &sess);
+
+    let sids: Vec<String> = sess.iter().map(|s| s.id.clone()).collect(); // id сессий
+
+    let msgs: Vec<Message> = state.messages.read().unwrap().values().filter(|m| sids.contains(&m.session_id)).cloned().collect(); // его сообщения
+
+    save_json(&format!("{}/messages.json", dir), &msgs); // пишем сообщения
+
+    if let Some(b) = state.raw_bytes
+        .read()
+        .unwrap()
+        .get(id) { 
+            std::fs::create_dir_all(&dir).ok(); 
+            std::fs::write(format!("{}/stream.bin", dir), b).ok(); 
+        } 
+} 
+
+
+fn persist_global(state: &AppState) { // сохранить наблюдения и модели
+
+    let obs: Vec<Observation> = state.observations.read()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    save_json("data/observations.json", &obs); 
+    let mods: Vec<Model> = state.models.read()// все модели
+        .unwrap()
+        .values()
+        .cloned()
+        .collect(); 
+    save_json("data/models.json", &mods); 
+
+} 
+
+
+fn load_store() -> AppData { // загрузка всего stora
+    let mut captures = HashMap::new();
+    let mut sessions = HashMap::new();
+    let mut messages = HashMap::new();
+    let mut raw_bytes = HashMap::new();
+    if let Ok(dirs) = std::fs::read_dir("data/captures") {
+        for e in dirs.flatten() { // каждая папка
+            let id = e.file_name().to_string_lossy().to_string(); // id = имя папки
+            let base = format!("data/captures/{}", id);
+            if let Ok(b) = std::fs::read(format!("{}/meta.json", base)) { if let Ok(c) = serde_json::from_slice::<Capture>(&b) { captures.insert(c.id.clone(), c); } } // мета (ЗАПРЕЩЕНА В РФ)
+            if let Ok(b) = std::fs::read(format!("{}/sessions.json", base)) { if let Ok(v) = serde_json::from_slice::<Vec<Session>>(&b) { for s in v { sessions.insert(s.id.clone(), s); } } } // сессии
+            if let Ok(b) = std::fs::read(format!("{}/messages.json", base)) { if let Ok(v) = serde_json::from_slice::<Vec<Message>>(&b) { for m in v { messages.insert(m.id.clone(), m); } } } // сообщения
+            if let Ok(b) = std::fs::read(format!("{}/stream.bin", base)) { raw_bytes.insert(id, b); } // поток
+        } 
+    }
+    let mut observations = HashMap::new(); // наблюдения
+    if let Ok(b) = std::fs::read("data/observations.json") { if let Ok(v) = serde_json::from_slice::<Vec<Observation>>(&b) { for o in v { observations.insert(o.id.clone(), o); } } } // грузим наблюдения
+    let mut models = HashMap::new(); // модели
+    if let Ok(b) = std::fs::read("data/models.json") { if let Ok(v) = serde_json::from_slice::<Vec<Model>>(&b) { for m in v { models.insert(m.id.clone(), m); } } } // грузим модели
+    AppData { captures: RwLock::new(captures), sessions: RwLock::new(sessions), messages: RwLock::new(messages), observations: RwLock::new(observations), models: RwLock::new(models), raw_bytes: RwLock::new(raw_bytes) } // собираем стор
+} 
+
 async fn import_capture(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -90,25 +179,55 @@ async fn import_capture(
 
     // фотографируем закат будто пару лет назад
     state.captures.write().unwrap().insert(capture_id.clone(), capture.clone());
-    state.raw_bytes.write().unwrap().insert(capture_id.clone(), file_bytes);
-
-    // создаём сессии
-    for (idx, s_core) in sessions_core.iter().enumerate() {
+    let mut stream: Vec<u8> = Vec::new(); //стрим денжерлёхи
+    for s_core in sessions_core.iter() { // Штурмуем сессии
         let session_id = Uuid::new_v4().to_string();
+        let mut ordered = s_core.packets.clone();
+        ordered.sort_by_key(|p| p.timestamp_us);
+        let mut msgs: Vec<Message> = Vec::new(); // сообщения этой сессии
+        for pkt in ordered.iter().filter(|p| !p.payload.is_empty()) { // только пакеты с данными
+            let from_client = pkt.src_ip == s_core.key.client_ip.octets() && pkt.src_port == s_core.key.client_port; 
+            let (direction, role) = if from_client { ("request".to_string(), "REQ".to_string()) } else { ("response".to_string(), "RSP".to_string()) };
+            let byte_offset = stream.len() as u64; //смещение в общем потоке
+            stream.extend_from_slice(&pkt.payload); // не спеша добавляем пакет в поток (Пакистанчик родненький)
+            let ts = chrono::DateTime::from_timestamp_micros(pkt.timestamp_us as i64);// время в пакистанчике + сдвиг
+            msgs.push(Message {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                packet_number: pkt.index as u32,
+                byte_offset,
+                direction,
+                role,
+                length: pkt.payload.len() as u64,
+                status: "unknown".to_string(),
+                label: format!("{} б", pkt.payload.len()),
+                timestamp: ts.map(|d| d.to_rfc3339()).unwrap_or(now.clone()),
+                interpretation: "not-parsed".to_string(),
+                verified: false,
+                model_id: None,
+                fields: vec![],
+            }); 
+        }
+
+
         let session = Session {
-            id: session_id,
-            capture_id: capture_id.clone(),
-            tuple: SessionTuple {
-            // s_core.key.client_ip это айпишник клиента
-            source: Endpoint { address: s_core.key.client_ip.to_string(), port: s_core.key.client_port },
-            // s_core.key.server_ip - айпишник сервера
-            destination: Endpoint { address: s_core.key.server_ip.to_string(), port: s_core.key.server_port },
+            id: session_id.clone(), 
+            capture_id: capture_id.clone(), 
+            tuple: SessionTuple { // реальный тюпл из ядра
+                source: Endpoint { address: s_core.key.client_ip.to_string(), port: s_core.key.client_port },
+                destination: Endpoint { address: s_core.key.server_ip.to_string(), port: s_core.key.server_port },
             },
-            message_count: s_core.packets.len() as u32, //лялялял тополя
-            started_at: now.clone()
-        };
-        state.sessions.write().unwrap().insert(session.id.clone(), session);
-    }
+            message_count: msgs.len() as u32, // число сообщений
+            started_at: now.clone(),
+        }; 
+        state.sessions.write().unwrap().insert(session_id.clone(), session); 
+        let mut all = state.messages.write().unwrap(); // лочим стор (ахаххахаха store типо магазин) сообщений
+        for m in msgs { all.insert(m.id.clone(), m); } // кладём сообщения в стор
+    } 
+
+    state.raw_bytes.write().unwrap().insert(capture_id.clone(), stream);
+    persist_capture(&state, &capture_id);
+    std::fs::write(format!("{}/source.pcap", capture_dir(&capture_id)), &file_bytes).ok();
 
     Ok((StatusCode::CREATED, Json(capture)))
 }
@@ -785,6 +904,7 @@ async fn save_observation(
         .write()
         .unwrap()
         .insert(obs.id.clone(), obs);
+    persist_global(&state);
     StatusCode::NO_CONTENT
 }
 
@@ -797,6 +917,7 @@ async fn remove_observation(
     if observations.remove(&id).is_none() {
         return Err(api_error("Observation not found", StatusCode::NOT_FOUND));
     }
+    persist_global(&state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -823,9 +944,10 @@ async fn check_model(
         }
     }
     let msgs = state.messages.read().unwrap();
+    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == body.capture_id).map(|s| s.id.clone()).collect();
     let mut rows: Vec<CheckRow> = Vec::new();
     for a in &actions {
-        let hit = msgs.values().find(|m| m.session_id.contains(&body.capture_id) || m.id == a.id);
+        let hit = msgs.values().find(|m| sids.contains(&m.session_id));
         let (status, extracted, mid) = match hit {
             Some(m) => ("ok", "-".to_string(), Some(m.id.clone())),
             None => ("unknown", "-".to_string(), None),
@@ -853,6 +975,7 @@ async fn save_model(
     Json(model): Json<Model>,
 ) -> StatusCode {
     state.models.write().unwrap().insert(model.id.clone(), model);
+    persist_global(&state);
     StatusCode::NO_CONTENT
 }
 
@@ -864,6 +987,7 @@ async fn remove_model(
     if models.remove(&model_id).is_none() {
         return Err(api_error("Model not found", StatusCode::NOT_FOUND));
     }
+    persist_global(&state);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -883,6 +1007,7 @@ async fn add_observation(
     
     //реестр наблюдей
     state.observations.write().unwrap().insert(body.id.clone(), body);
+    persist_global(&state);
     
     Json(json!({ "status": "saved" }))
 }
@@ -1039,14 +1164,7 @@ async fn export_project(
 
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(AppData {
-        captures: RwLock::new(HashMap::new()),
-        sessions: RwLock::new(HashMap::new()),
-        messages: RwLock::new(HashMap::new()),
-        observations: RwLock::new(HashMap::new()),
-        models: RwLock::new(HashMap::new()),
-        raw_bytes: RwLock::new(HashMap::new()),
-    });
+    let state = Arc::new(load_store());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

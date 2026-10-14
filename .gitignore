@@ -1,2 +1,4 @@
 /target
 *.tar.gz
+data/
+uploads/
