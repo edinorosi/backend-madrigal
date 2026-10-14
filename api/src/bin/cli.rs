@@ -318,8 +318,8 @@ fn cmd_verify(args: &[&str]) {
 
     if !journal_entries.is_empty() {
         report.push_str("## Связь с журналом действий (R2)\n\n");
-        report.push_str("| Время | Действие | Параметр |\n");
-        report.push_str("|-------|----------|----------|\n");
+        report.push_str("| action_id | start_utc | action | parameters | observed_result |\n");
+        report.push_str("|---|---|---|---|---|\n");
         for entry in &journal_entries {
             report.push_str(&format!("| `{}` | {} | `{}` | `{}` | `{}` |\n", 
                 entry.action_id, 

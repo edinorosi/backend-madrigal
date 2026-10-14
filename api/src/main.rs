@@ -26,8 +26,8 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use dto::{
-    Action, Capture, CheckResult, CheckSummary, Endpoint, Message, Model, Observation, Session,
-    SessionTuple,
+    Action, Capture, CheckResult, CheckRow, CheckSummary, Endpoint, Message, Model, Observation,
+    Session, SessionTuple,
 };
 
 
@@ -99,11 +99,13 @@ async fn import_capture(
             id: session_id,
             capture_id: capture_id.clone(),
             tuple: SessionTuple {
-                source: Endpoint { address: "0.0.0.0".to_string(), port: 12345 }, // TODO: взять из s_core
-                destination: Endpoint { address: "0.0.0.0".to_string(), port: 80 },
+            // s_core.key.client_ip это айпишник клиента
+            source: Endpoint { address: s_core.key.client_ip.to_string(), port: s_core.key.client_port },
+            // s_core.key.server_ip - айпишник сервера
+            destination: Endpoint { address: s_core.key.server_ip.to_string(), port: s_core.key.server_port },
             },
-            message_count: s_core.packets.len() as u32, // Заглушка
-            started_at: now.clone(),
+            message_count: s_core.packets.len() as u32, //лялялял тополя
+            started_at: now.clone()
         };
         state.sessions.write().unwrap().insert(session.id.clone(), session);
     }
@@ -301,6 +303,10 @@ async fn verify_corpus(
         Some(arr) => arr.clone(),
         None => return Json(json!({"error": "files array required"})).into_response(),
     };
+
+    if files.len() > 8 {
+        return Json(json!({"error": "too many files"})).into_response();
+    }
     
     let framing_str = body["framing"]["type"].as_str().unwrap_or("fixed");
     let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
@@ -646,36 +652,128 @@ async fn get_project(State(state): State<AppState>, AxumPath(id): AxumPath<Strin
     }
 }
 
-async fn list_actions(
-    State(_state): State<AppState>,
-    AxumPath(_capture_id): AxumPath<String>,
-) -> Json<Vec<Action>> {
-    // TODO: парсинг action_journal.csv
-    Json(vec![])
+#[derive(serde::Deserialize)]
+struct JournalRow {
+    capture: String,
+    action_id: String,
+    start_utc: String,
+    action: String,
+    parameters: String,
+    observed_result: String,
 }
 
+fn parse_action_value(raw: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    for key in ["threshold_c", "count", "period_ms"] { //крч проходим по ключам с приоритетным выбором 
+        if let Some(n) = v.get(key).and_then(|x| x.as_f64()) { // ключ есть и это число
+            return Some(n);
+        } 
+    }
+    None
+}
+
+async fn list_actions(
+    State(state): State<AppState>,
+    AxumPath(capture_id): AxumPath<String>,
+) -> Json<Vec<Action>> {
+    let wanted_file = state.captures.read().unwrap()
+        .get(&capture_id).map(|c| c.file_name.clone()).unwrap_or_default();
+    let mut rdr = match csv::Reader::from_path("fixtures/action_journal.csv") {
+        Ok(r) => r,
+        Err(_) => return Json(vec![]),
+    };
+    let mut out = Vec::new();
+    for row in rdr.deserialize::<JournalRow>().flatten() {
+        if !wanted_file.is_empty()
+            && row.capture != wanted_file
+            && !row.capture.ends_with(&wanted_file)
+            && !wanted_file.ends_with(&row.capture) {
+            continue;
+        }
+        let timestamp = if row.start_utc.len() >= 19 {
+            row.start_utc[11..19].to_string()
+        } else {
+            row.start_utc.clone()
+        };
+        out.push(Action {
+            id: row.action_id,
+            timestamp,
+            name: row.action.clone(),
+            description: row.action.clone(),
+            value: parse_action_value(&row.parameters), 
+            expected_message_id: None,
+        });
+    }
+    Json(out)
+}
+#[derive(serde::Deserialize)]
+struct MsgQuery { direction: Option<String> }
+
+
 async fn list_messages(
-    State(_state): State<AppState>,
-    AxumPath(_session_id): AxumPath<String>,
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(q): Query<MsgQuery>,
 ) -> Json<Vec<Message>> {
-    // TODO: генерация сообщений из сессий
-    Json(vec![])
+    let msgs = state.messages.read().unwrap();  //читаем месаги
+    let list: Vec<Message> = msgs.values()      // идём по всем месагам
+        .filter(|m| m.session_id == session_id) //только эта сессия
+        .filter(|m| match &q.direction {        //фильтруем по направлению
+            None => true,                       //если нет query то обе стороны
+            Some(d) => &m.direction == d,       // с query одна сторона
+        })
+        .cloned() // клонируем из-за RwLock
+        .collect();
+    Json(list)
 }
 
 async fn list_observations(
-    State(_state): State<AppState>,
-    AxumPath(_message_id): AxumPath<String>,
+    State(state): State<AppState>, //состояние с обсервайшн
+    AxumPath(message_id): AxumPath<String>, 
 ) -> Json<Vec<Observation>> {
-    Json(vec![])
+    let obs = state.observations.read().unwrap(); //всё читаем
+    let list = obs.values() // фильтруем по айдишке месаги
+        .filter(|o| o.message_id == message_id)
+        .cloned()
+        .collect();
+    Json(list)
 }
 
+#[derive(serde::Deserialize)]
+#[allow(non_snake_case)]
+struct ApplyBody { modelId: Option<String>, model_id: Option<String> }
+
 async fn apply_model(
-    State(_state): State<AppState>,
-    AxumPath(_message_id): AxumPath<String>,
-    Json(_body): Json<serde_json::Value>,
+    State(state): State<AppState>,
+    AxumPath(message_id): AxumPath<String>,
+    Json(body): Json<ApplyBody>,
 ) -> Json<Vec<dto::MessageField>> {
-    // TODO: применение модели к сообщению
-    Json(vec![])
+    let _ = message_id.as_str();
+
+    let mid = body.modelId.or(body.model_id).unwrap_or_default(); // получаем айдишник 
+    let models = state.models.read().unwrap(); //ищем модель
+    if models.get(&mid).is_none() { return Json(vec![]); } // нет модели - бабах
+    
+    let msg = state.messages.read().unwrap().get(&message_id).cloned(); // ищем сообщение по :message_id из пути
+    let m = match msg { 
+        Some(v) => v,
+        None => return Json(vec![]),
+    };
+    let first_rule = models.get(&mid).and_then(|md| md.rules.first().cloned()); // берём первый закон шариата модели для подписи поля
+    let (fname, ftype, rid) = match first_rule { //достаём имя/тип/id правилалалалала
+        Some(r) => (r.name.clone(), r.fields.first().map(|f| f.field_type.clone()).unwrap_or("bytes".to_string()), Some(r.id.clone())),
+        None => ("byte0".to_string(), "bytes".to_string(), None),
+    }; 
+    let flen = if m.length > 0 { 1 } else { 0 }; // длина заглушки 1 байт если сообщение непустое
+    Json(vec![dto::MessageField {
+        id: format!("fld-{}-0", m.id),
+        name: fname,
+        field_type: ftype, 
+        value: "-".to_string(), 
+        range: dto::ByteRange { offset: 0, length: flen },
+        note: None,
+        rule_id: rid,
+    }]) 
 }
 
 async fn save_observation(
@@ -702,22 +800,44 @@ async fn remove_observation(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+struct CheckBody { capture_id: String, model_id: Option<String> }
 
 async fn check_model(
-    State(_state): State<AppState>,
-    Json(_body): Json<serde_json::Value>,
+    State(state): State<AppState>,
+    Json(body): Json<CheckBody>,
 ) -> Json<CheckResult> {
-    // TODO: прогон модели по журналу
+    let wanted_file = state.captures.read().unwrap()
+        .get(&body.capture_id).map(|c| c.file_name.clone()).unwrap_or_default(); //ищем файлы только со своими действиями
+    let mut actions: Vec<Action> = Vec::new(); 
+    if let Ok(mut rdr) = csv::Reader::from_path("fixtures/action_journal.csv") {
+        for row in rdr.deserialize::<JournalRow>().flatten() { //парсим каждую строку csv, если не парсится то пропуск
+            if !wanted_file.is_empty()
+                && row.capture != wanted_file
+                && !row.capture.ends_with(&wanted_file)
+                && !wanted_file.ends_with(&row.capture) {
+                continue;
+            }
+            let ts = if row.start_utc.len() >= 19 { row.start_utc[11..19].to_string() } else { row.start_utc.clone() }; //вырезка HH:MM:SS из iso
+            actions.push(Action { id: row.action_id, timestamp: ts, name: row.action.clone(), description: row.action.clone(), value: parse_action_value(&row.parameters), expected_message_id: None });
+        }
+    }
+    let msgs = state.messages.read().unwrap();
+    let mut rows: Vec<CheckRow> = Vec::new();
+    for a in &actions {
+        let hit = msgs.values().find(|m| m.session_id.contains(&body.capture_id) || m.id == a.id);
+        let (status, extracted, mid) = match hit {
+            Some(m) => ("ok", "-".to_string(), Some(m.id.clone())),
+            None => ("unknown", "-".to_string(), None),
+        };
+        rows.push(CheckRow { id: format!("chk-{}", a.id), action_id: a.id.clone(), time: a.timestamp.clone(), action: a.name.clone(), expected: a.value, extracted, status: status.to_string(), message_id: mid });
+    }
+    let total = rows.len() as u32;
+    let ok = rows.iter().filter(|r| r.status == "ok").count() as u32;
     Json(CheckResult {
-        rows: vec![],
-        summary: CheckSummary {
-            total: 0,
-            ok: 0,
-            partial: 0,
-            unknown: 0,
-            error: 0,
-        },
-        model_id: None,
+        rows,
+        summary: CheckSummary { total, ok, partial: 0, unknown: total - ok, error: 0 },
+        model_id: body.model_id,
         model_name: None,
     })
 }
@@ -935,22 +1055,22 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/v1/captures", get(list_captures).post(import_capture))
-        .route("/api/v1/captures/{capture_id}/sessions", get(list_sessions))
-        .route("/api/v1/captures/{capture_id}/bytes", get(get_bytes))
-        .route("/api/v1/captures/{capture_id}/actions", get(list_actions))
-        .route("/api/v1/sessions/{session_id}/messages", get(list_messages))
-        .route("/api/v1/messages/{message_id}/observations", get(list_observations))
-        .route("/api/v1/messages/{message_id}/apply-model", post(apply_model))
+        .route("/api/v1/captures/:capture_id/sessions", get(list_sessions))
+        .route("/api/v1/captures/:capture_id/bytes", get(get_bytes))
+        .route("/api/v1/captures/:capture_id/actions", get(list_actions))
+        .route("/api/v1/sessions/:session_id/messages", get(list_messages))
+        .route("/api/v1/messages/:message_id/observations", get(list_observations))
+        .route("/api/v1/messages/:message_id/apply-model", post(apply_model))
         .route("/api/v1/observations", put(save_observation))
-        .route("/api/v1/observations/{id}", delete(remove_observation))
+        .route("/api/v1/observations/:id", delete(remove_observation))
         .route("/api/v1/check", post(check_model))
         .route("/api/v1/models", get(list_models).put(save_model))
-        .route("/api/v1/models/{model_id}", delete(remove_model))
+        .route("/api/v1/models/:model_id", delete(remove_model))
         .route("/api/v1/projects", post(create_project).get(get_projects))
-        .route("/api/v1/projects/{id}", get(get_project))
-        .route("/api/v1/projects/{id}/captures", post(upload_capture))
-        .route("/api/v1/projects/{id}/observations", post(add_observation))
-        .route("/api/v1/flows/{session_id}/bytes", post(get_flow_bytes))
+        .route("/api/v1/projects/:id", get(get_project))
+        .route("/api/v1/projects/:id/captures", post(upload_capture))
+        .route("/api/v1/projects/:id/observations", post(add_observation))
+        .route("/api/v1/flows/:session_id/bytes", post(get_flow_bytes))
         .route("/api/v1/interpret/apply", post(apply_interpretation))
         .route("/api/v1/verify/corpus", post(verify_corpus))
         .route("/api/v1/projects/export", post(export_project))
