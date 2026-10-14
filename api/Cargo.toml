@@ -18,6 +18,7 @@ rustyline = "14.0"
 csv = "1.3"
 protocol-lab-core = { path = "../core" }
 tokio-stream = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
 name = "protocol-lab-cli"

@@ -1,44 +1,117 @@
+mod dto;
+
 use axum::{
-    routing::{get, post},
-    Router,
-    Json,
-    extract::{Path as AxumPath, State, Multipart},
-    response::{Response, IntoResponse},
     body::Body,
-    http::{StatusCode, header},
+    extract::{Multipart, Path as AxumPath, Query, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post, put},
+    Json, Router,
 };
 use axum::response::sse::{Event, KeepAlive, Sse};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use std::convert::Infallible;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use uuid::Uuid;
-use std::path::Path as StdPath;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tower_http::cors::{Any, CorsLayer};
-use tar::Builder;
+use chrono::Utc;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use protocol_lab_core::interpreter::{apply_rule, FieldType, FramingRule, frame_stream, InterpretationRule};
+use protocol_lab_core::pcap::{reader::read_pcap, session::group_into_sessions};
+use protocol_lab_core::tcp::stream::StreamChunk;
+use serde_json::json;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::path::Path as StdPath;
+use std::sync::{Arc, RwLock};
+use tar::Builder;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tower_http::cors::{Any, CorsLayer};
+use uuid::Uuid;
 
-use protocol_lab_core::{pcap::{diagnostics::analyze_session, session}, tcp::stream::StreamChunk};
-use protocol_lab_core::interpreter::{apply_rule, InterpretationRule, FieldType, FramingRule, frame_stream};
+use dto::{
+    Action, Capture, CheckResult, CheckSummary, Endpoint, Message, Model, Observation, Session,
+    SessionTuple,
+};
 
-// СОСТОЯНИЕ ПРИЛОЖЕНИЯ (ррррр)
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Project {
-    pub id: String,
-    pub name: String,
-    pub file_path: Option<String>,
-    pub observations: Vec<serde_json::Value>,
-}
 
 pub struct AppData {
-    pub projects: RwLock<HashMap<String, Project>>,
+    pub captures: RwLock<HashMap<String, Capture>>,
+    pub sessions: RwLock<HashMap<String, Session>>,
+    pub messages: RwLock<HashMap<String, Message>>,
+    pub observations: RwLock<HashMap<String, Observation>>,
+    pub models: RwLock<HashMap<String, Model>>,
+    pub raw_bytes: RwLock<HashMap<String, Vec<u8>>>, // хранение пустых писи-файлы 
 }
 
 // ВАЖНО: Здесь должно быть AppData, а не AppState, чтобы не было цикла
 pub type AppState = Arc<AppData>;
+
+
+async fn list_captures(State(state): State<AppState>) -> Json<Vec<Capture>> {
+    let captures = state.captures.read().unwrap();
+    let list: Vec<Capture> = captures.values().cloned().collect();
+    Json(list)
+}
+
+async fn import_capture(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<Capture>), (StatusCode, Json<dto::ErrorResponse>)> {
+    let mut file_bytes: Vec<u8> = Vec::new(); //байтсы
+    let mut file_name = String::from("unknown.pcap"); //временное название
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name().unwrap_or("") == "file" {
+            file_name = field.file_name().unwrap_or("unknown.pcap").to_string();
+            file_bytes = field.bytes().await.map_err(|_| api_error("Failed to read file", StatusCode::BAD_REQUEST))?.to_vec(); //пишем байтсы
+        }
+    }
+
+    if file_bytes.is_empty() {
+        return Err(api_error("File is empty or missing", StatusCode::BAD_REQUEST));
+    }
+
+    // парсим pcap во временный файл
+    let temp_path = format!("/tmp/{}.pcap", Uuid::new_v4());
+    std::fs::write(&temp_path, &file_bytes).map_err(|_| api_error("IO Error", StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let packets = protocol_lab_core::pcap::reader::read_pcap(StdPath::new(&temp_path))
+        .map_err(|e| api_error(&format!("PCAP parse error: {}", e), StatusCode::BAD_REQUEST))?;
+
+    let sessions_core = protocol_lab_core::pcap::session::group_into_sessions(&packets);
+    
+    let capture_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let capture = Capture {
+        id: capture_id.clone(),
+        file_name,
+        imported_at: now.clone(),
+        size_bytes: file_bytes.len() as u64,
+        session_count: sessions_core.len() as u32,
+    };
+
+    // фотографируем закат будто пару лет назад
+    state.captures.write().unwrap().insert(capture_id.clone(), capture.clone());
+    state.raw_bytes.write().unwrap().insert(capture_id.clone(), file_bytes);
+
+    // создаём сессии
+    for (idx, s_core) in sessions_core.iter().enumerate() {
+        let session_id = Uuid::new_v4().to_string();
+        let session = Session {
+            id: session_id,
+            capture_id: capture_id.clone(),
+            tuple: SessionTuple {
+                source: Endpoint { address: "0.0.0.0".to_string(), port: 12345 }, // TODO: взять из s_core
+                destination: Endpoint { address: "0.0.0.0".to_string(), port: 80 },
+            },
+            message_count: s_core.packets.len() as u32, // Заглушка
+            started_at: now.clone(),
+        };
+        state.sessions.write().unwrap().insert(session.id.clone(), session);
+    }
+
+    Ok((StatusCode::CREATED, Json(capture)))
+}
+
+
 
 async fn get_flow_bytes(
     AxumPath(session_id): AxumPath<String>,
@@ -94,6 +167,29 @@ async fn get_flow_bytes(
     }).collect();
 
     Json(json!({"flow": "client_to_server", "chunks": result}))
+}
+
+fn api_error(msg: &str, status: StatusCode) -> (StatusCode, Json<dto::ErrorResponse>) {
+    (status, Json(dto::ErrorResponse { error: msg.to_string() }))
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    AxumPath(capture_id): AxumPath<String>,
+) -> Result<Json<Vec<Session>>, (StatusCode, Json<dto::ErrorResponse>)> {
+    // проверяем существования снимка
+    if !state.captures.read().unwrap().contains_key(&capture_id) {
+        return Err(api_error("Capture not found", StatusCode::NOT_FOUND));
+    }
+
+    let sessions = state.sessions.read().unwrap();
+    let list: Vec<Session> = sessions
+        .values()
+        .filter(|s| s.capture_id == capture_id)
+        .cloned()
+        .collect();
+    
+    Ok(Json(list))
 }
 
 
@@ -363,6 +459,41 @@ async fn verify_corpus(
         .into_response()
 }
 
+
+
+async fn get_bytes(
+    State(state): State<AppState>,
+    AxumPath(capture_id): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<dto::ErrorResponse>)> {
+    if !state.captures.read().unwrap().contains_key(&capture_id) {
+        return Err(api_error("Capture not found", StatusCode::NOT_FOUND));
+    }
+
+    //берём параметрыы
+    let offset: u64 = params.get("offset").and_then(|s| s.parse().ok()).ok_or_else(|| api_error("Missing offset", StatusCode::BAD_REQUEST))?; // <-- Добавь ? здесь
+    let length: u64 = params.get("length").and_then(|s| s.parse().ok()).ok_or_else(|| api_error("Missing length", StatusCode::BAD_REQUEST))?; // <-- И здесь
+
+    let raw = state.raw_bytes.read().unwrap();
+    let bytes = raw
+        .get(&capture_id)
+        .ok_or_else(|| api_error("No raw bytes", StatusCode::NOT_FOUND))?;
+
+    let start = offset as usize;
+    let end = start + length as usize;
+
+    if end > bytes.len() { //вышли за рамки дозволенного
+        return Err(api_error("Range out of bounds", StatusCode::BAD_REQUEST));
+    }
+
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes[start..end].to_vec(),
+    ))
+}
+
+
 async fn analyze_autosuggest(
     Json(body): Json<serde_json::Value>
 ) -> Json<serde_json::Value> {
@@ -485,52 +616,155 @@ async fn create_project(State(state): State<AppState>, Json(body): Json<serde_js
     let id = Uuid::new_v4().to_string();
     let name = body["name"].as_str().unwrap_or("Untitled Project").to_string();
 
-    let new_project = Project {
-        id: id.clone(),
-        name, 
-        file_path: None,
-        observations: Vec::new(),
-    };
+    let new_capture = Capture {
+       id: id.clone(),
+       file_name: name,
+       imported_at: chrono::Utc::now().to_rfc3339(),
+       size_bytes: 0,
+       session_count: 0,
+   };
 
-    state.projects.write().unwrap().insert(id.clone(), new_project);
+   state.captures.write().unwrap().insert(id.clone(), new_capture);
 
     Json(json!({ "id": id, "status": "created"}))
 }
 
 //Священный эндпоинт
-async fn get_projects(
-    State(state): State<AppState> //state - это общая память со всеми проектами
-) -> Json<serde_json::Value>{
-    let project = state.projects.read().unwrap(); //мирное чтение (так как у нас был RwLock, мы аккуратно получили разрешение на чтение. Остальные могут тоже читать но не могут изменгять)
-    let list: Vec<serde_json::Value> = project.values().map(|p| { //
-        json!({"id": p.id, "name": p.name})
-    }).collect(); //Собираем в джейсона
+async fn get_projects(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let captures = state.captures.read().unwrap(); 
+    let list: Vec<serde_json::Value> = captures.values().map(|c| {
+        json!({"id": c.id, "name": c.file_name})
+    }).collect(); 
     Json(json!({"projects": list})) 
 }
 
-async fn get_project(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>
-) -> Json<serde_json::Value>{
-    let projects = state.projects.read().unwrap();
-    match projects.get(&id) {
-        Some(p) => Json(json!(p)),
-        None => Json(json!({ "error": "Project not found" }))
+async fn get_project(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Json<serde_json::Value> {
+    let captures = state.captures.read().unwrap(); // <-- Добавили присваивание
+    match captures.get(&id) { 
+        Some(c) => Json(json!(c)),
+        None => Json(json!({ "error": "Capture not found" }))
     }
 }
 
-async fn add_observation(
+async fn list_actions(
+    State(_state): State<AppState>,
+    AxumPath(_capture_id): AxumPath<String>,
+) -> Json<Vec<Action>> {
+    // TODO: парсинг action_journal.csv
+    Json(vec![])
+}
+
+async fn list_messages(
+    State(_state): State<AppState>,
+    AxumPath(_session_id): AxumPath<String>,
+) -> Json<Vec<Message>> {
+    // TODO: генерация сообщений из сессий
+    Json(vec![])
+}
+
+async fn list_observations(
+    State(_state): State<AppState>,
+    AxumPath(_message_id): AxumPath<String>,
+) -> Json<Vec<Observation>> {
+    Json(vec![])
+}
+
+async fn apply_model(
+    State(_state): State<AppState>,
+    AxumPath(_message_id): AxumPath<String>,
+    Json(_body): Json<serde_json::Value>,
+) -> Json<Vec<dto::MessageField>> {
+    // TODO: применение модели к сообщению
+    Json(vec![])
+}
+
+async fn save_observation(
+    State(state): State<AppState>,
+    Json(obs): Json<Observation>,
+) -> StatusCode {
+    state
+        .observations
+        .write()
+        .unwrap()
+        .insert(obs.id.clone(), obs);
+    StatusCode::NO_CONTENT
+}
+
+
+async fn remove_observation(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-    Json(body): Json<serde_json::Value>
-) -> Json<serde_json::Value> {
-    let mut projects = state.projects.write().unwrap(); //получаем все проекты из состояния
-    if let Some(project) = projects.get_mut(&id) { //поиск проекта по айди (get_mut - получанеие изменяемой ссылки (&mut))
-        project.observations.push(body); 
-        Json(json!({ "status": "saved", "total_observations": project.observations.len() }))
-    } else {
-        Json(json!({ "error": "Project not found" }))
+) -> Result<StatusCode, (StatusCode, Json<dto::ErrorResponse>)> {
+    let mut observations = state.observations.write().unwrap();
+    if observations.remove(&id).is_none() {
+        return Err(api_error("Observation not found", StatusCode::NOT_FOUND));
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+
+async fn check_model(
+    State(_state): State<AppState>,
+    Json(_body): Json<serde_json::Value>,
+) -> Json<CheckResult> {
+    // TODO: прогон модели по журналу
+    Json(CheckResult {
+        rows: vec![],
+        summary: CheckSummary {
+            total: 0,
+            ok: 0,
+            partial: 0,
+            unknown: 0,
+            error: 0,
+        },
+        model_id: None,
+        model_name: None,
+    })
+}
+
+async fn list_models(State(state): State<AppState>) -> Json<Vec<Model>> {
+    let models = state.models.read().unwrap();
+    let list: Vec<Model> = models.values().cloned().collect();
+    Json(list)
+}
+
+async fn save_model(
+    State(state): State<AppState>,
+    Json(model): Json<Model>,
+) -> StatusCode {
+    state.models.write().unwrap().insert(model.id.clone(), model);
+    StatusCode::NO_CONTENT
+}
+
+async fn remove_model(
+    State(state): State<AppState>,
+    AxumPath(model_id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<dto::ErrorResponse>)> {
+    let mut models = state.models.write().unwrap();
+    if models.remove(&model_id).is_none() {
+        return Err(api_error("Model not found", StatusCode::NOT_FOUND));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+
+
+async fn add_observation(
+    State(state): State<AppState>, 
+    AxumPath(message_id): AxumPath<String>, 
+    Json(mut body): Json<dto::Observation>
+) -> Json<serde_json::Value> {
+    body.message_id = message_id;
+
+    if body.id.is_empty() {
+        body.id = uuid::Uuid::new_v4().to_string();
+    }
+    body.created_at = chrono::Utc::now().to_rfc3339();
+    
+    //реестр наблюдей
+    state.observations.write().unwrap().insert(body.id.clone(), body);
+    
+    Json(json!({ "status": "saved" }))
 }
 
 async fn generate_report( //мясо, наверное даже фарш. Генератор отчётов
@@ -590,9 +824,11 @@ async fn upload_capture(
         Ok(packets) => {
             let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets); //отденьно отсордировываем по группам пакеты чтобы не было мешанины
 
-            if let Ok(mut projects) = state.projects.write() {
-                if let Some(project) = projects.get_mut(&id){ //ищем конктреный проекти по его ID + блокируем запись
-                    project.file_path = Some(saved_file_path.clone());
+            if let Ok(mut captures) = state.captures.write() {
+                if let Some(capture) = captures.get_mut(&id) { 
+                    capture.file_name = saved_file_path.clone();
+                    capture.session_count = sessions.len() as u32;
+                    capture.size_bytes = std::fs::metadata(&saved_file_path).map(|m| m.len()).unwrap_or(0);
                 }
             }
 
@@ -684,17 +920,37 @@ async fn export_project(
 #[tokio::main]
 async fn main() {
     let state = Arc::new(AppData {
-        projects: RwLock::new(HashMap::new()),
+        captures: RwLock::new(HashMap::new()),
+        sessions: RwLock::new(HashMap::new()),
+        messages: RwLock::new(HashMap::new()),
+        observations: RwLock::new(HashMap::new()),
+        models: RwLock::new(HashMap::new()),
+        raw_bytes: RwLock::new(HashMap::new()),
     });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/v1/captures", get(list_captures).post(import_capture))
+        .route("/api/v1/captures/{capture_id}/sessions", get(list_sessions))
+        .route("/api/v1/captures/{capture_id}/bytes", get(get_bytes))
+        .route("/api/v1/captures/{capture_id}/actions", get(list_actions))
+        .route("/api/v1/sessions/{session_id}/messages", get(list_messages))
+        .route("/api/v1/messages/{message_id}/observations", get(list_observations))
+        .route("/api/v1/messages/{message_id}/apply-model", post(apply_model))
+        .route("/api/v1/observations", put(save_observation))
+        .route("/api/v1/observations/{id}", delete(remove_observation))
+        .route("/api/v1/check", post(check_model))
+        .route("/api/v1/models", get(list_models).put(save_model))
+        .route("/api/v1/models/{model_id}", delete(remove_model))
         .route("/api/v1/projects", post(create_project).get(get_projects))
-        .route("/api/v1/projects/:id", get(get_project))
-        .route("/api/v1/projects/:id/captures", post(upload_capture))
-        .route("/api/v1/projects/:id/observations", post(add_observation))
-        .route("/api/v1/flows/:session_id/bytes", post(get_flow_bytes))
+        .route("/api/v1/projects/{id}", get(get_project))
+        .route("/api/v1/projects/{id}/captures", post(upload_capture))
+        .route("/api/v1/projects/{id}/observations", post(add_observation))
+        .route("/api/v1/flows/{session_id}/bytes", post(get_flow_bytes))
         .route("/api/v1/interpret/apply", post(apply_interpretation))
         .route("/api/v1/verify/corpus", post(verify_corpus))
         .route("/api/v1/projects/export", post(export_project))
