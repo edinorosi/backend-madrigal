@@ -159,6 +159,8 @@ pub struct Model {
     pub status: String,
     pub rules: Vec<ModelRule>,
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
