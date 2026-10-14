@@ -14,6 +14,7 @@ pub struct RawPacket {  //структура пакета
     pub ack: u32, 
     pub flags: TcpFlags, 
     pub payload: Vec<u8>, 
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)] 
@@ -24,7 +25,7 @@ pub struct TcpFlags {
     pub ack: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]  // Hash для HashMap, Eq для сравнения
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]  // Hash для HashMap, Eq для сравнения
 pub struct SessionKey {  // Уникальный идентификатор сессии (4-ка адресов)
     pub client_ip: Ipv4Addr,   // IP клиента
     pub client_port: u16,      // Порт клиента
@@ -38,6 +39,9 @@ pub struct Session {
     pub packets: Vec<RawPacket>, // Все пакеты этой сессии (оба направления)
     pub first_timestamp: u64,    // Время первого пакета (для синхронизации с журналом)
     pub last_timestamp: u64,     // Время последнего пакета
+    pub epoch: u32,
+    pub roles_known: bool,
+    pub diagnostics: SessionDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]  // Направление потока
@@ -53,10 +57,11 @@ pub struct Flow {
     pub packets: Vec<RawPacket>, // Только пакеты этого направления
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]  // Диагностика сессии (требование 7.3)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]  // Диагностика сессии (требование 7.3)
 pub struct SessionDiagnostics {
     pub handshake_complete: bool,   // Был ли полный SYN → SYN-ACK
     pub has_gaps: bool,             // Были ли пропуски в seq numbers
     pub has_retransmissions: bool,  // Были ли дубликаты пакетов
     pub missing_start: bool,        // Первый пакет не SYN (начало недоступно)
+    pub has_conflicting_overlap: bool,
 }

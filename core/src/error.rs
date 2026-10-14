@@ -10,4 +10,7 @@ pub enum Error {
     
     #[error("TCP reassembly error: {0}")]
     Reassembly(String),
+
+    #[error("Checksum policy error: {0}")]
+    Checksum(String),
 }

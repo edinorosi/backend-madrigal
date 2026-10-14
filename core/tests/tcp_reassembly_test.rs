@@ -14,6 +14,7 @@ fn make_packet(index: usize, seq: u32, payload: Vec<u8>) -> RawPacket { // Хе�
         ack: 0,                     // ACK не важен
         flags: TcpFlags { syn: false, fin: false, rst: false, ack: true }, // Обычный ACK-пакет
         payload,                    // Данные (параметр)
+        truncated: false,
     }
 }
 
