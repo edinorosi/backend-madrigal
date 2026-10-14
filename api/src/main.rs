@@ -795,6 +795,32 @@ async fn get_project(State(state): State<AppState>, AxumPath(id): AxumPath<Strin
     }
 }
 
+async fn remove_capture(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<dto::ErrorResponse>)> {
+    if state.captures.write().unwrap().remove(&id).is_none() {
+        return Err(api_error("Capture not found", StatusCode::NOT_FOUND));
+    }
+    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == id).map(|s| s.id.clone()).collect();
+    let mut mids: Vec<String> = Vec::new();
+    state.messages.write().unwrap().retain(|_, m| {
+        if sids.contains(&m.session_id) {
+            mids.push(m.id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    state.sessions.write().unwrap().retain(|_, s| s.capture_id != id);
+    state.raw_bytes.write().unwrap().remove(&id);
+    state.observations.write().unwrap().retain(|_, o| !mids.contains(&o.message_id));
+    state.last_check.write().unwrap().remove(&id);
+    std::fs::remove_dir_all(capture_dir(&id)).ok();
+    persist_global(&state);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(serde::Deserialize)]
 struct JournalRow {
     capture: String,
@@ -1234,6 +1260,16 @@ async fn export_project(
 
 #[tokio::main]
 async fn main() {
+    if let Ok(rd) = std::fs::read_dir("/tmp") {
+        for e in rd.flatten() {
+            let p = e.path();
+            let is_orphan = p.extension().and_then(|s| s.to_str()) == Some("pcap")
+                && p.file_stem().and_then(|s| s.to_str()).map(|s| s.len() == 36).unwrap_or(false);
+            if is_orphan {
+                std::fs::remove_file(&p).ok();
+            }
+        }
+    }
     let state = Arc::new(load_store());
 
     let cors = CorsLayer::new()
@@ -1246,6 +1282,7 @@ async fn main() {
         .route("/api/v1/captures/:capture_id/sessions", get(list_sessions))
         .route("/api/v1/captures/:capture_id/bytes", get(get_bytes))
         .route("/api/v1/captures/:capture_id/actions", get(list_actions))
+        .route("/api/v1/captures/:id", delete(remove_capture))
         .route("/api/v1/sessions/:session_id/messages", get(list_messages))
         .route("/api/v1/messages/:message_id/observations", get(list_observations))
         .route("/api/v1/messages/:message_id/apply-model", post(apply_model))
