@@ -1,5 +1,3 @@
-use std::path::Path as StdPath;
-
 use axum::Json;
 use serde_json::json;
 
@@ -38,72 +36,19 @@ pub(crate) async fn analyze_autosuggest(
         return Json(json!({"hypotheses": [], "message": "Недостаточно данных для анализа"}));
     }
 
-    let mut hypotheses = Vec::new(); //гипотезы
-
-    for size in [4, 8, 12, 16, 24, 32, 64, 128] {
-        if clean_bytes.len() % size == 0 && (clean_bytes.len() / size) >= 3 {
-            
-            hypotheses.push(json!({
-                "type": "fixed_size",
-                "confidence": 0.85,
-                "reason": format!("Длина потока ({}) идеально делится на {}. Найдено {} сообщений.", clean_bytes.len(), size, clean_bytes.len() / size),
-                "suggested_framing": {"type": "fixed", "size": size}
-            }));
-            break;
-        }
-    }
-
-    for prefix_bytes in [1,2] {
-        let mut valid_count = 0;
-        let mut total_checked = 0;
-        let mut offset = 0;
-
-        while offset + prefix_bytes <= clean_bytes.len() {
-            let len = if prefix_bytes == 1 {
-                clean_bytes[offset] as usize
-            } else {
-                u16::from_be_bytes([clean_bytes[offset], clean_bytes[offset+1]]) as usize
-            };
-
-            if len > 0 && len < 4096 && offset + prefix_bytes + len <= clean_bytes.len() {
-                valid_count += 1;
-                offset += prefix_bytes + len;
-            } else {
-                break;
-            }
-            total_checked += 1;
-        }
-
-        if total_checked >= 3 && (valid_count as f64 / total_checked as f64) > 0.7 {
-            hypotheses.push(json!({
-                "type": "length_prefixed",
-                "confidence": 0.90,
-                "reason": format!("Первые {} байта успешно интерпретируются как длина payload в {} сообщениях.", prefix_bytes, valid_count),
-                "suggested_framing": {"type": "length_prefixed", "size_bytes": prefix_bytes}
-            }));
-            break;
-        }
-    }
-
-    let sync_words = [[0xAA, 0x55], [0x55, 0xAA], [0xFF, 0x00], [0x00, 0xFF], [0x7E, 0x7E]];
-    for &sync in &sync_words {
-        let mut count = 0;
-        for i in 0..clean_bytes.len().saturating_sub(1) {
-            if clean_bytes[i] == sync[0] && clean_bytes[i+1] == sync[1] {
-                count += 1;
-            }
-        }
-        if count >= 3 {
-            let sync_hex = format!("{:02X} {:02X}", sync[0], sync[1]);
-            hypotheses.push(json!({
-                "type": "sync_word",
-                "confidence": 0.75,
-                "reason": format!("Найден повторяющийся маркер {} {} раз(а). Возможно, это начало фрейма.", sync_hex, count),
-                "suggested_framing": {"type": "sync_word", "sync": sync_hex}
-            }));
-
-        }
-    }
+    let registry = protocol_lab_core::patterns::load_registry(std::path::Path::new("patterns"));
+    let mut hypotheses: Vec<serde_json::Value> = protocol_lab_core::patterns::run_all(&registry, &clean_bytes)
+        .into_iter()
+        .map(|f| {
+            json!({
+                "type": f.ftype,
+                "confidence": f.confidence,
+                "reason": f.reason,
+                "suggested_framing": f.framing,
+                "pattern_id": f.pattern_id,
+            })
+        })
+        .collect();
 
     hypotheses.sort_by(|a, b| {
         b["confidence"].as_f64().unwrap_or(0.0)

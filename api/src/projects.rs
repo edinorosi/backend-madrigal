@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::dto::Capture;
 use crate::error::api_error;
-use crate::state::{persist_global, AppState};
+use crate::state::AppState;
 
 pub(crate) async fn create_project(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let id = Uuid::new_v4().to_string();

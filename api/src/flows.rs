@@ -1,10 +1,7 @@
-use std::path::Path as StdPath;
-
-use axum::{extract::{Path as AxumPath, State}, Json};
+use axum::{extract::Path as AxumPath, Json};
 use serde_json::json;
 
 use crate::error::jail_path;
-use crate::state::AppState;
 
 pub(crate) async fn get_flow_bytes(
     AxumPath(session_id): AxumPath<String>,

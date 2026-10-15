@@ -1,0 +1,26 @@
+{
+  "id": "fixed-size",
+  "name": "Фиксированный размер",
+  "kind": "framing",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "sizes": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      64,
+      128
+    ],
+    "min_messages": 3,
+    "confidence": 0.85,
+    "note": "Можно менять sizes, min_messages и confidence. Первое подходящее значение побеждает."
+  },
+  "output": {
+    "framing": "fixed",
+    "confidence": "const"
+  }
+}

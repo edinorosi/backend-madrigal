@@ -1,0 +1,14 @@
+{
+  "id": "sync-word",
+  "name": "Синхрослово",
+  "kind": "framing",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "words": ["AA 55", "55 AA", "FF 00", "00 FF", "7E 7E"],
+    "min_count": 3,
+    "confidence": 0.75,
+    "note": "words: hex-пары через пробел. Маркер ищется скользящим окном по всему потоку."
+  },
+  "output": { "framing": "sync_word", "confidence": "const" }
+}

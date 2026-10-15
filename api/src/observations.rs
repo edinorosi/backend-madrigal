@@ -27,9 +27,14 @@ pub(crate) async fn remove_observation(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<crate::dto::ErrorResponse>)> {
-    let mut observations = state.observations.write().unwrap();
-    if observations.remove(&id).is_none() {
-        return Err(api_error("Observation not found", StatusCode::NOT_FOUND));
+    eprintln!("[observations] remove {id}");
+    {
+        let mut observations = state.observations.write().unwrap();
+        if observations.remove(&id).is_none() {
+            return Err(api_error("Observation not found", StatusCode::NOT_FOUND));
+        }
+        
+        // прости Аллах за код выше
     }
     persist_global(&state);
     Ok(StatusCode::NO_CONTENT)

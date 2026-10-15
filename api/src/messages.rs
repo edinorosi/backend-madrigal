@@ -7,7 +7,7 @@ use crate::dto::{Message, Observation};
 use crate::state::AppState;
 
 #[derive(serde::Deserialize)]
-struct MsgQuery { direction: Option<String> }
+pub(crate) struct MsgQuery { direction: Option<String> }
 
 
 pub(crate) async fn list_messages(

@@ -25,6 +25,7 @@ fn main() {
             "verify" => cmd_verify(&cmd_args),
             "analyze" => cmd_analyze(&cmd_args),
             "export" => cmd_export(&cmd_args),
+            "infer" => cmd_infer(&cmd_args),
             "help" => print_help(),
             _ => {
                 eprintln!("Неизвестная команда: {}", command);
@@ -67,6 +68,7 @@ fn main() {
                     "verify" => cmd_verify(cmd_args),
                     "analyze" => cmd_analyze(cmd_args),
                     "export" => cmd_export(cmd_args),
+                    "infer" => cmd_infer(cmd_args),
                     "exit" | "quit" => {
                         println!("👋 До свидания!");
                         break;
@@ -99,6 +101,8 @@ fn print_help() {
     println!("                                  <archive>  - путь к .tar.gz проекту");
     println!("                                  [target]   - (опционально) путь к новому .pcap");
     println!("  analyze <pcap>                - Авто-анализ PCAP и поиск паттернов");
+    println!("  infer <pcap> --journal <csv> --out <model.json>");
+    println!("                                  - Вывести модель из PCAP по журналу действий");
     println!("  export <archive> <output>     - Экспорт проекта в отчёт");
     println!("  exit / quit                   - Выйти из оболочки\n");
 }
@@ -406,6 +410,187 @@ fn cmd_export(args: &[&str]) {
     
     println!("Экспорт проекта из {} в {}", archive, output);
     println!("Экспорт завершён. (Полная генерация отчёта будет добавлена позже)");
+}
+
+fn cmd_infer(args: &[&str]) {
+    if args.is_empty() {
+        println!("Использование: infer <pcap> [--journal <csv>] [--out <model.json>] [--framing fixed:N|length_prefixed|length_prefixed_u16]");
+        return;
+    }
+    let pcap_path = args[0].to_string();
+    let mut journal_path: Option<String> = None;
+    let mut output = "model.json".to_string();
+    let mut framing_arg: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i] {
+            "--journal" => {
+                if i + 1 < args.len() {
+                    journal_path = Some(args[i + 1].to_string());
+                    i += 2;
+                } else {
+                    println!(" Ошибка: ожидается путь после --journal");
+                    return;
+                }
+            }
+            "--out" => {
+                if i + 1 < args.len() {
+                    output = args[i + 1].to_string();
+                    i += 2;
+                } else {
+                    println!(" Ошибка: ожидается путь после --out");
+                    return;
+                }
+            }
+            "--framing" => {
+                if i + 1 < args.len() {
+                    framing_arg = Some(args[i + 1].to_string());
+                    i += 2;
+                } else {
+                    println!(" Ошибка: ожидается значение после --framing");
+                    return;
+                }
+            }
+            _ => {
+                println!(" Неизвестный аргумент: {}", args[i]);
+                return;
+            }
+        }
+    }
+
+    let packets = match read_pcap(Path::new(&pcap_path)) {
+        Ok(p) => p,
+        Err(e) => { println!(" Ошибка чтения PCAP: {}", e); return; }
+    };
+    let sessions = group_into_sessions(&packets);
+    println!("Сессий: {}", sessions.len());
+
+    let mut samples: Vec<(Vec<u8>, i64)> = Vec::new();
+    match framing_arg.as_deref() {
+        Some(f) => {
+            let rule = if let Some(n) = f.strip_prefix("fixed:").and_then(|s| s.parse::<usize>().ok()) {
+                FramingRule::FixedSize(n)
+            } else if f == "length_prefixed_u16" {
+                FramingRule::LengthPrefixedU16Big
+            } else {
+                FramingRule::LengthPrefixed
+            };
+            for session in &sessions {
+                let (c2s, s2c) = split_into_flows(session);
+                for flow in [&c2s, &s2c] {
+                    let chunks = TcpReassembler::reassemble(&flow.packets);
+                    let mut clean: Vec<u8> = Vec::new();
+                    let mut marks: Vec<(usize, i64)> = Vec::new();
+                    for chunk in &chunks {
+                        if let StreamChunk::Data { packet_index, .. } = chunk {
+                            if let Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
+                                if !pkt.payload.is_empty() {
+                                    marks.push((clean.len(), pkt.timestamp_us as i64));
+                                    clean.extend_from_slice(&pkt.payload);
+                                }
+                            }
+                        }
+                    }
+                    for msg in frame_stream(&clean, &rule) {
+                        let mut ts = marks.first().map(|(_, t)| *t).unwrap_or(0);
+                        for (off, t) in &marks {
+                            if *off <= msg.stream_offset {
+                                ts = *t;
+                            } else {
+                                break;
+                            }
+                        }
+                        if !msg.payload.is_empty() {
+                            samples.push((msg.payload, ts));
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            for session in &sessions {
+                let mut ordered = session.packets.clone();
+                ordered.sort_by_key(|p| p.timestamp_us);
+                for pkt in ordered.iter().filter(|p| !p.payload.is_empty()) {
+                    samples.push((pkt.payload.clone(), pkt.timestamp_us as i64));
+                }
+            }
+        }
+    }
+    println!("Сэмплов: {}", samples.len());
+
+    let mut labeled: Vec<protocol_lab_core::infer::LabeledSample> = Vec::new();
+    if let Some(jp) = journal_path {
+        let want = Path::new(&pcap_path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let mut rdr = match csv::Reader::from_path(&jp) {
+            Ok(r) => r,
+            Err(e) => { println!(" Ошибка чтения журнала: {}", e); return; }
+        };
+        for row in rdr.deserialize::<JournalEntry>().flatten() {
+            if !row.capture.is_empty() && row.capture != want && !row.capture.ends_with(want) && !want.ends_with(&row.capture) {
+                continue;
+            }
+            let s = chrono::DateTime::parse_from_rfc3339(&row.start_utc).ok().map(|d| d.timestamp_micros());
+            let e = chrono::DateTime::parse_from_rfc3339(&row.end_utc).ok().map(|d| d.timestamp_micros());
+            let v: Option<f64> = serde_json::from_str::<serde_json::Value>(&row.parameters).ok().and_then(|p| {
+                ["threshold_c", "count", "period_ms"].iter().filter_map(|k| p.get(*k)?.as_f64()).next()
+            });
+            let mut best: Option<(&Vec<u8>, i64, bool)> = None;
+            for (bytes, ts) in &samples {
+                match (s, e) {
+                    (Some(a), Some(b)) if *ts >= a && *ts <= b => {
+                        if best.map(|(_, bt, inw)| !inw || *ts < bt).unwrap_or(true) {
+                            best = Some((bytes, *ts, true));
+                        }
+                    }
+                    _ => {
+                        if v.is_some() {
+                            if let Some(anchor) = s.or(e) {
+                                let dt = (*ts - anchor).abs();
+                                if dt <= 60_000_000 && best.map(|(_, bdt, inw)| !inw && dt < bdt).unwrap_or(true) {
+                                    best = Some((bytes, dt, false));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((bytes, _, _)) = best {
+                labeled.push(protocol_lab_core::infer::LabeledSample { bytes: bytes.clone(), expected: v });
+            }
+        }
+    } else {
+        for (bytes, _) in &samples {
+            labeled.push(protocol_lab_core::infer::LabeledSample { bytes: bytes.clone(), expected: None });
+        }
+    }
+    let with_exp = labeled.iter().filter(|l| l.expected.is_some()).count();
+    println!("Размечено: {} из {}", with_exp, labeled.len());
+
+    let proposals = protocol_lab_core::infer::infer_rules(&labeled);
+    let rules: Vec<serde_json::Value> = proposals.iter().map(|p| {
+        serde_json::json!({
+            "id": format!("rule-{}", uuid::Uuid::new_v4()),
+            "name": match p.opcode { Some(o) => format!("opcode 0x{:02X} / len {}", o, p.length), None => format!("len {}", p.length) },
+            "condition": { "opcode": p.opcode },
+            "fields": p.fields.iter().map(|f| serde_json::json!({
+                "name": f.name, "type": f.ftype, "offset": f.offset, "length": f.length,
+                "note": format!("{}/{}", f.matches, f.total),
+            })).collect::<Vec<_>>(),
+        })
+    }).collect();
+    let model = serde_json::json!({
+        "id": format!("infer-{}", uuid::Uuid::new_v4()),
+        "name": format!("auto {}", pcap_path),
+        "status": "draft",
+        "rules": rules,
+        "createdAt": chrono::Utc::now().to_rfc3339(),
+        "updatedAt": chrono::Utc::now().to_rfc3339(),
+    });
+    match std::fs::write(&output, serde_json::to_string_pretty(&model).unwrap_or_default()) {
+        Ok(_) => println!("Модель: {} правил, {} полей, записана в {}", rules.len(), rules.iter().map(|r| r["fields"].as_array().map(|a| a.len()).unwrap_or(0)).sum::<usize>(), output),
+        Err(e) => println!(" Не удалось записать {}: {}", output, e),
+    }
 }
 
 #[derive(Deserialize)]

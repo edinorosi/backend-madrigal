@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::Path as StdPath;
 
 use axum::{response::sse::{Event, KeepAlive, Sse}, Json};
 use axum::response::IntoResponse;

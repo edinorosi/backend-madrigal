@@ -95,7 +95,7 @@ fn format_field_value(bytes: &[u8], ftype: &str) -> String {
     }
 }
 
-fn apply_rules_to_bytes(
+pub(crate) fn apply_rules_to_bytes(
     bytes: &[u8],
     model: &crate::dto::Model,
 ) -> (Vec<crate::dto::MessageField>, String, Option<String>) {
@@ -155,9 +155,31 @@ fn apply_rules_to_bytes(
     (fields, status, Some(rule.id.clone()))
 }
 
+pub(crate) fn message_bytes(state: &crate::state::AppState, msg: &crate::dto::Message) -> Vec<u8> {
+    let start = msg.byte_offset as usize;
+    let sessions = state.sessions.read().unwrap();
+    let stream = match sessions.get(&msg.session_id).and_then(|s| state.raw_bytes.read().unwrap().get(&s.capture_id).cloned()) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let end = start.saturating_add(msg.length as usize).min(stream.len());
+    if start >= stream.len() { Vec::new() } else { stream[start..end].to_vec() }
+}
+
+pub(crate) fn decode_number(bytes: &[u8], ftype: &str) -> Option<f64> {
+    match ftype {
+        "uint8" => bytes.first().map(|b| *b as f64),
+        "uint16be" => (bytes.len() >= 2).then(|| u16::from_be_bytes([bytes[0], bytes[1]]) as f64),
+        "uint16le" => (bytes.len() >= 2).then(|| u16::from_le_bytes([bytes[0], bytes[1]]) as f64),
+        "uint32be" => (bytes.len() >= 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64),
+        "uint32le" => (bytes.len() >= 4).then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64),
+        _ => None,
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[allow(non_snake_case)]
-struct ApplyBody { modelId: Option<String>, model_id: Option<String> }
+pub(crate) struct ApplyBody { modelId: Option<String>, model_id: Option<String> }
 
 pub(crate) async fn apply_model(
     State(state): State<AppState>,
@@ -190,10 +212,10 @@ pub(crate) async fn apply_model(
         })
         .unwrap_or_default();
     let (fields, interpretation, _) = apply_rules_to_bytes(&bytes, &model);
-    let status = if fields.is_empty() {
+    let status = if interpretation == "not-parsed" {
         "unknown".to_string()
     } else {
-        "parsed".to_string()
+        interpretation.clone()
     };
     if let Some(stored) = state.messages.write().unwrap().get_mut(&message_id) {
         stored.fields = fields.clone();
@@ -227,10 +249,96 @@ pub(crate) async fn remove_model(
     State(state): State<AppState>,
     AxumPath(model_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<crate::dto::ErrorResponse>)> {
-    let mut models = state.models.write().unwrap();
-    if models.remove(&model_id).is_none() {
-        return Err(api_error("Model not found", StatusCode::NOT_FOUND));
+    eprintln!("[models] remove {model_id}");
+    {
+        let mut models = state.models.write().unwrap();
+        if models.remove(&model_id).is_none() {
+            return Err(api_error("Model not found", StatusCode::NOT_FOUND));
+        }
+        // guard дропается здесь: persist_global ниже снова берёт models.read(),
+        // std::sync::RwLock не реентерабелен — держать write через persist нельзя.
     }
     persist_global(&state);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::{ModelField, ModelRule, ModelRuleCondition};
+
+    fn frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![0xAA, 0x55, opcode];
+        let len = payload.len() as u16;
+        v.extend_from_slice(&len.to_be_bytes());
+        v.extend_from_slice(payload);
+        let crc = v.iter().fold(0u16, |a, b| a.wrapping_add(*b as u16));
+        v.extend_from_slice(&crc.to_be_bytes());
+        v
+    }
+
+    fn model() -> crate::dto::Model {
+        crate::dto::Model {
+            id: "m".to_string(),
+            name: "M".to_string(),
+            status: "draft".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            rules: vec![crate::dto::ModelRule {
+                id: "r".to_string(),
+                name: "R".to_string(),
+                condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None },
+                fields: vec![
+                    ModelField { name: "marker".to_string(), field_type: "bytes".to_string(), offset: serde_json::Value::from(0), length: serde_json::Value::from(2), note: None },
+                    ModelField { name: "op".to_string(), field_type: "uint8".to_string(), offset: serde_json::Value::from(2), length: serde_json::Value::from(1), note: None },
+                    ModelField { name: "len".to_string(), field_type: "uint16be".to_string(), offset: serde_json::Value::from(3), length: serde_json::Value::from(2), note: None },
+                    ModelField { name: "payload".to_string(), field_type: "bytes".to_string(), offset: serde_json::Value::from(5), length: serde_json::Value::from("rest-2"), note: None },
+                    ModelField { name: "crc".to_string(), field_type: "uint16be".to_string(), offset: serde_json::Value::from("end-2"), length: serde_json::Value::from(2), note: None },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn roundtrip_opcode_rule() {
+        let md = model();
+        let bytes = frame(0x01, &[0x07, 0x08]);
+        let (fields, status, rule) = apply_rules_to_bytes(&bytes, &md);
+        assert_eq!(status, "parsed");
+        assert_eq!(rule.as_deref(), Some("r"));
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[1].value, "0x01");
+        assert_eq!(fields[2].value, "0x0002");
+        for f in &fields {
+            let back = decode_number(&bytes[f.range.offset as usize..(f.range.offset + f.range.length) as usize], &f.field_type);
+            if ["uint8", "uint16be", "uint16le", "uint32be", "uint32le"].contains(&f.field_type.as_str()) {
+                assert!(back.is_some());
+            } else {
+                assert!(back.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_wrong_opcode_no_match() {
+        let md = model();
+        let bytes = frame(0x02, &[0x07]);
+        let (fields, status, rule) = apply_rules_to_bytes(&bytes, &md);
+        assert_eq!(status, "not-parsed");
+        assert!(rule.is_none());
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_out_of_range_field_skipped() {
+        let mut md = model();
+        md.rules[0].fields.push(ModelField { name: "big".to_string(), field_type: "uint32be".to_string(), offset: serde_json::Value::from(100), length: serde_json::Value::from(4), note: None });
+        let bytes = frame(0x01, &[0x07]);
+        let (fields, status, _) = apply_rules_to_bytes(&bytes, &md);
+        assert_eq!(status, "parsed");
+        assert!(fields.iter().all(|f| f.name != "big")); // out-of-range поле пропущено, остальное покрыло всё
+        assert_eq!(decode_number(&[0xA6], "uint8"), Some(166.0));
+        assert_eq!(decode_number(&[0xA6], "uint32be"), None);
+        assert_eq!(decode_number(&[], "bytes"), None);
+    }
 }

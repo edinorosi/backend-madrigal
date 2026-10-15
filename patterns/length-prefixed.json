@@ -1,0 +1,17 @@
+{
+  "id": "length-prefixed",
+  "name": "Длина в префиксе",
+  "kind": "framing",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "prefix_bytes": [1, 2],
+    "prefix_encoding": "u8_then_u16be",
+    "max_len": 4096,
+    "min_messages": 3,
+    "min_rate": 0.7,
+    "confidence": 0.9,
+    "note": "prefix_bytes: сколько байт читать как длину. u8 читается как есть, 2 байта как u16be."
+  },
+  "output": { "framing": "length_prefixed", "confidence": "const" }
+}

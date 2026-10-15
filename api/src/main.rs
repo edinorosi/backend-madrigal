@@ -1,9 +1,11 @@
 mod analysis;
 mod captures;
 mod check;
+mod codegen;
 mod dto;
 mod error;
 mod flows;
+mod infer;
 mod interpret;
 mod messages;
 mod models;
@@ -52,6 +54,7 @@ async fn main() {
         .route("/api/v1/check", post(check::check_model))
         .route("/api/v1/models", get(models::list_models).put(models::save_model))
         .route("/api/v1/models/:model_id", delete(models::remove_model))
+        .route("/api/v1/models/:model_id/codegen", get(codegen::codegen))
         .route("/api/v1/projects", post(projects::create_project).get(projects::get_projects))
         .route("/api/v1/projects/:id", get(projects::get_project))
         .route("/api/v1/projects/:id/captures", post(projects::upload_capture))
@@ -63,6 +66,7 @@ async fn main() {
         .route("/api/v1/projects/export", post(projects::export_project))
         .route("/api/v1/report/generate", post(projects::generate_report))
         .route("/api/v1/analyze/autosuggest", post(analysis::analyze_autosuggest))
+        .route("/api/v1/analyze/fields", post(infer::analyze_fields))
         .layer(cors)
         .with_state(state);
 
