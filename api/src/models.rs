@@ -14,6 +14,11 @@ fn rule_matches(bytes: &[u8], cond: &crate::dto::ModelRuleCondition) -> bool {
             return false;
         }
     }
+    if let Some(mlen) = cond.message_length {
+        if bytes.len() as u32 != mlen {
+            return false;
+        }
+    }
     if cond.opcode.is_some() || cond.opcodes.is_some() {
         if bytes.len() <= 2 {
             return false;
@@ -287,7 +292,7 @@ mod tests {
             rules: vec![crate::dto::ModelRule {
                 id: "r".to_string(),
                 name: "R".to_string(),
-                condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None },
+                condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
                 fields: vec![
                     ModelField { name: "marker".to_string(), field_type: "bytes".to_string(), offset: serde_json::Value::from(0), length: serde_json::Value::from(2), note: None },
                     ModelField { name: "op".to_string(), field_type: "uint8".to_string(), offset: serde_json::Value::from(2), length: serde_json::Value::from(1), note: None },
@@ -317,6 +322,27 @@ mod tests {
                 assert!(back.is_none());
             }
         }
+    }
+
+    #[test]
+    fn message_length_disambiguates_same_opcode() {
+        let mut md = model();
+        md.rules.push(crate::dto::ModelRule {
+            id: "r-long".to_string(),
+            name: "R-long".to_string(),
+            condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(9) },
+            fields: vec![],
+        });
+        // короткое сообщение: первое правило (без message_length) срабатывает
+        let short = frame(0x01, &[0x07, 0x08]);
+        let (_, status, rule) = apply_rules_to_bytes(&short, &md);
+        assert_eq!(status, "parsed");
+        assert_eq!(rule.as_deref(), Some("r"));
+        // длинное сообщение opcode 0x01: первое правило тоже матчится (порядок),
+        // а правило с чужой длиной — нет
+        let cond = ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(100) };
+        assert!(!rule_matches(&short, &cond));
+        assert!(rule_matches(&short, &ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(short.len() as u32) }));
     }
 
     #[test]

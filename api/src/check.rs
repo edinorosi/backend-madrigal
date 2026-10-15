@@ -61,7 +61,12 @@ pub(crate) async fn list_actions(
 }
 
 #[derive(serde::Deserialize)]
-pub(crate) struct CheckBody { capture_id: String, model_id: Option<String> }
+pub(crate) struct CheckBody {
+    #[serde(alias = "captureId")]
+    capture_id: String,
+    #[serde(alias = "modelId")]
+    model_id: Option<String>,
+}
 
 pub(crate) fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_micros())

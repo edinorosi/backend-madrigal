@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     extract::{Multipart, Path as AxumPath, State},
     http::{header, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     Json,
 };
 use flate2::write::GzEncoder;
@@ -55,12 +55,12 @@ pub(crate) async fn generate_report( //мясо, наверное даже фа�
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>
 ) -> Response<Body> {
-    let project_name = body["project_name"].as_str().unwrap_or("Без названия");
-    let cid = body["capture_id"].as_str().unwrap_or("");
+    let project_name = body["project_name"].as_str().or_else(|| body["projectName"].as_str()).unwrap_or("Без названия");
+    let cid = body["capture_id"].as_str().or_else(|| body["captureId"].as_str()).unwrap_or("");
     let saved = state.last_check.read().unwrap().get(cid).cloned();
     let (total, success, errors, rows) = match saved {
         Some(r) => (r.summary.total as u64, r.summary.ok as u64, r.summary.error as u64, r.rows),
-        None => return Response::builder().status(404).body(Body::from("no check for capture")).unwrap(),
+        None => return api_error("no check for capture", StatusCode::NOT_FOUND).into_response(),
     };
 
     let mut md = String::new();
@@ -83,14 +83,15 @@ pub(crate) async fn upload_capture(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     mut form: Multipart 
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
     let _ = std::fs::create_dir_all("uploads");
     
     let mut saved_file_path = String::from("uploads/unknown.pcap");
 
     // Проходим по полям по полям синий трактор едет к нам
     while let Ok(Some(field)) = form.next_field().await {
-        let file_name = field.file_name().unwrap_or("upload.pcap").to_string(); //деаноним имя файла
+        let raw_name = field.file_name().unwrap_or("upload.pcap").to_string(); //деаноним имя файла
+        let file_name = StdPath::new(&raw_name).file_name().and_then(|n| n.to_str()).unwrap_or("upload.pcap"); // только имя, без ../../
         
         let data = field.bytes().await.unwrap_or_default(); // записываем байты в дату переменную йо
 
@@ -113,15 +114,15 @@ pub(crate) async fn upload_capture(
                 }
             }
 
-            Json(json!({
+            Ok(Json(json!({
                 "project_id": id,
                 "packets_found": packets.len(),
                 "sessions_found": sessions.len(),
                 "saved_to": saved_file_path
-            }))
+            })))
         }
         Err(e) => {
-            Json(json!({"error": format!("Ошибка чтения pcap: {}", e)}))
+            Err(api_error(&format!("Ошибка чтения pcap: {}", e), StatusCode::BAD_REQUEST))
         }
     }
 }
@@ -211,13 +212,20 @@ pub(crate) async fn export_project(
     if let Some(files_arr) = body["files"].as_array() {
         for file_val in files_arr {
             if let Some(file_path) = file_val.as_str() {
-                let path = StdPath::new(file_path);
+                let path = match crate::error::jail_path(file_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[export] путь вне разрешённых, пропущен: {} ({})", file_path, e);
+                        continue;
+                    }
+                };
                 if path.exists() {
                     let file_name = path.file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("unknown.pcap");
+                        .unwrap_or("unknown.pcap")
+                        .to_string();
                     
-                    tar_builder.append_path_with_name(path, file_name).ok();
+                    tar_builder.append_path_with_name(&path, file_name).ok();
                 } else {
                     eprintln!("[export] файл не найден, пропущен: {}", file_path);
                 }

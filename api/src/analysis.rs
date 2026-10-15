@@ -1,22 +1,26 @@
-use axum::Json;
+use axum::{http::StatusCode, Json};
 use serde_json::json;
 
-use crate::error::jail_path;
+use crate::error::{api_error, jail_path};
 
 pub(crate) async fn analyze_autosuggest(
     Json(body): Json<serde_json::Value>
-) -> Json<serde_json::Value> {
-    let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
-    let path = match jail_path(file_path) { Ok(p) => p, Err(e) => return Json(json!({"error": e})) };
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    let file_path = body["file_path"].as_str().or_else(|| body["filePath"].as_str()).unwrap_or("no_file.pcap");
+    let path = match jail_path(file_path) {
+        Ok(p) => p,
+        Err(e) if e == "file not found" => return Err(api_error(&e, StatusCode::NOT_FOUND)),
+        Err(e) => return Err(api_error(&e, StatusCode::FORBIDDEN)),
+    };
 
     let packets = match protocol_lab_core::pcap::reader::read_pcap(&path) {
         Ok(p) => p,
-        Err(e) => return Json(json!({"error": e.to_string()})),
+        Err(e) => return Err(api_error(&e.to_string(), StatusCode::BAD_REQUEST)),
     };
 
     let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
     if sessions.is_empty() {
-        return Json(json!({"error": "No sessions found"}));
+        return Err(api_error("No sessions found", StatusCode::NOT_FOUND));
     }
 
     let session = &sessions[0];
@@ -33,7 +37,7 @@ pub(crate) async fn analyze_autosuggest(
     }
 
     if clean_bytes.len() < 10 {
-        return Json(json!({"hypotheses": [], "message": "Недостаточно данных для анализа"}));
+        return Ok(Json(json!({"hypotheses": [], "message": "Недостаточно данных для анализа"})));
     }
 
     let registry = protocol_lab_core::patterns::load_registry(std::path::Path::new("patterns"));
@@ -56,11 +60,11 @@ pub(crate) async fn analyze_autosuggest(
             .unwrap()
     });
 
-    Json(json!({
+    Ok(Json(json!({
         "file": file_path,
         "total_bytes_analyzed": clean_bytes.len(),
         "hypotheses": hypotheses
-    }))
+    })))
 
 
 

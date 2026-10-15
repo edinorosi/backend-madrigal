@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::dto::{Capture, Endpoint, Message, Session, SessionTuple};
 use crate::error::api_error;
-use crate::state::{capture_dir, persist_capture, AppState};
+use crate::state::{capture_dir_in, persist_capture, AppState};
 
 pub(crate) async fn list_captures(State(state): State<AppState>) -> Json<Vec<Capture>> {
     let captures = state.captures.read().unwrap();
@@ -89,7 +89,7 @@ pub(crate) fn ingest_packets(state: &AppState, file_name: String, file_bytes: Ve
 
     state.raw_bytes.write().unwrap().insert(capture_id.clone(), stream);
     persist_capture(&state, &capture_id);
-    std::fs::write(format!("{}/source.pcap", capture_dir(&capture_id)), &file_bytes).ok();
+    std::fs::write(format!("{}/source.pcap", capture_dir_in(&state.data_dir, &capture_id)), &file_bytes).ok();
 
     Ok(capture)
 }
@@ -173,6 +173,9 @@ pub(crate) async fn remove_capture(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(api_error("Bad capture id", StatusCode::BAD_REQUEST));
+    }
     if state.captures.write().unwrap().remove(&id).is_none() {
         return Err(api_error("Capture not found", StatusCode::NOT_FOUND));
     }
@@ -190,7 +193,7 @@ pub(crate) async fn remove_capture(
     state.raw_bytes.write().unwrap().remove(&id);
     state.observations.write().unwrap().retain(|_, o| !mids.contains(&o.message_id));
     state.last_check.write().unwrap().remove(&id);
-    std::fs::remove_dir_all(capture_dir(&id)).ok();
+    std::fs::remove_dir_all(capture_dir_in(&state.data_dir, &id)).ok();
     crate::state::persist_global(&state);
     Ok(StatusCode::NO_CONTENT)
 }

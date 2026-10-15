@@ -1,28 +1,32 @@
-use axum::{extract::Path as AxumPath, Json};
+use axum::{extract::Path as AxumPath, http::StatusCode, Json};
 use serde_json::json;
 
-use crate::error::jail_path;
+use crate::error::{api_error, jail_path};
 
 pub(crate) async fn get_flow_bytes(
     AxumPath(session_id): AxumPath<String>,
     Json(body): Json<serde_json::Value>
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
 
     //fkkf[ ,f,f[]]
 
-    let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
-    let path = match jail_path(file_path) { Ok(p) => p, Err(e) => return Json(json!({"error": e})) };
+    let file_path = body["file_path"].as_str().or_else(|| body["filePath"].as_str()).unwrap_or("no_file.pcap");
+    let path = match jail_path(file_path) {
+        Ok(p) => p,
+        Err(e) if e == "file not found" => return Err(api_error(&e, StatusCode::NOT_FOUND)),
+        Err(e) => return Err(api_error(&e, StatusCode::FORBIDDEN)),
+    };
 
     let packets = match protocol_lab_core::pcap::reader::read_pcap(&path) {
         Ok(p) => p,
-        Err(e) => return Json(json!({"error": e.to_string()})),
+        Err(e) => return Err(api_error(&e.to_string(), StatusCode::BAD_REQUEST)),
     };
 
     let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
     let idx: usize = session_id.parse().unwrap_or(0);
     
     if idx >= sessions.len() {
-        return Json(json!({"error": "Session not found"}));
+        return Err(api_error("Session not found", StatusCode::NOT_FOUND));
     }
     let session = &sessions[idx];
 
@@ -56,5 +60,5 @@ pub(crate) async fn get_flow_bytes(
         }
     }).collect();
 
-    Json(json!({"flow": "client_to_server", "chunks": result}))
+    Ok(Json(json!({"flow": "client_to_server", "chunks": result})))
 }

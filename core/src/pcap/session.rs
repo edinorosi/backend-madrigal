@@ -171,7 +171,7 @@ fn identify_session(packet: &RawPacket) -> SessionKey {
     }
 }
 
-//кушаем сухарики и разделяем сессию на два потока (клиент-сервер и наоброт)
+//кушаем сухарики (не эксперта) и разделяем сессию на два потока (клиент-сервер и наоброт)
 pub fn split_into_flows(session: &Session) -> (Flow, Flow) {
     let mut client_to_server = Vec::new();
     let mut server_to_client = Vec::new();

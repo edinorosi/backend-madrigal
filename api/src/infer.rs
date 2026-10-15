@@ -101,7 +101,11 @@ pub(crate) async fn analyze_fields(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
-    let capture_id = body.get("capture_id").and_then(|v| v.as_str()).unwrap_or("");
+    let capture_id = body
+        .get("capture_id")
+        .or_else(|| body.get("captureId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let wanted_file = state
         .captures
         .read()
@@ -122,7 +126,7 @@ pub(crate) async fn analyze_fields(
     let mut samples: Vec<Sample> = Vec::new();
     match framing {
         Some(ref rule) => {
-            let src = format!("data/captures/{}/source.pcap", capture_id);
+            let src = format!("{}/source.pcap", crate::state::capture_dir_in(&state.data_dir, capture_id));
             let path = jail_path(&src).map_err(|e| api_error(&e, StatusCode::NOT_FOUND))?;
             let packets = protocol_lab_core::pcap::reader::read_pcap(&path)
                 .map_err(|e| api_error(&format!("PCAP parse error: {}", e), StatusCode::BAD_REQUEST))?;
@@ -155,7 +159,11 @@ pub(crate) async fn analyze_fields(
             }
         }
     }
-    let journal_raw = body.get("journal_path").and_then(|v| v.as_str()).unwrap_or("fixtures/action_journal.csv");
+    let journal_raw = body
+        .get("journal_path")
+        .or_else(|| body.get("journalPath"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("fixtures/action_journal.csv");
     let journal = match crate::error::jail_path(journal_raw) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => return Err(api_error(&e, StatusCode::BAD_REQUEST)),
@@ -178,6 +186,18 @@ pub(crate) async fn analyze_fields(
             Some(o) => format!("opcode 0x{:02X} / len {}", o, p.length),
             None => format!("len {}", p.length),
         };
+        if p.fields.is_empty() {
+            evidence.push(json!({
+                "rule_id": rid,
+                "opcode": p.opcode,
+                "msg_len": p.length,
+                "samples": p.samples,
+                "labeled": p.labeled,
+                "fields": [],
+                "skipped": "no confident fields — правило не создано, кластер виден здесь",
+            }));
+            continue;
+        }
         rules.push(ModelRule {
             id: rid.clone(),
             name,
@@ -186,6 +206,7 @@ pub(crate) async fn analyze_fields(
                 opcodes: None,
                 length_equals: None,
                 max_message_length: None,
+                message_length: Some(p.length as u32),
             },
             fields: p
                 .fields

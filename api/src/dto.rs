@@ -140,6 +140,8 @@ pub struct ModelRuleCondition {
     pub length_equals: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_message_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_length: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

@@ -1,22 +1,22 @@
 use std::convert::Infallible;
 
-use axum::{response::sse::{Event, KeepAlive, Sse}, Json};
+use axum::{http::StatusCode, response::sse::{Event, KeepAlive, Sse}, Json};
 use axum::response::IntoResponse;
 use serde_json::json;
 
-use crate::error::jail_path;
+use crate::error::{api_error, jail_path};
 
 pub(crate) async fn apply_interpretation(
     Json(body): Json<serde_json::Value>
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
     let framing_str = body["framing"]["type"].as_str().unwrap_or("fixed");
     let framing_size = body["framing"]["size"].as_u64().unwrap_or(12) as usize;
     let framing_rule = match framing_str {
         "length_prefixed" => protocol_lab_core::interpreter::FramingRule::LengthPrefixed,
         _ => protocol_lab_core::interpreter::FramingRule::FixedSize(framing_size),
     };
-    let file_path = body["file_path"].as_str().unwrap_or("no_file.pcap");
-    let session_idx: usize = body["session_id"].as_u64().unwrap_or(0) as usize;
+    let file_path = body["file_path"].as_str().or_else(|| body["filePath"].as_str()).unwrap_or("no_file.pcap");
+    let session_idx: usize = body["session_id"].as_u64().or_else(|| body["sessionId"].as_u64()).unwrap_or(0) as usize;
     let _offset: usize = body["offset"].as_u64().unwrap_or(0) as usize;
 
     let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
@@ -33,15 +33,19 @@ pub(crate) async fn apply_interpretation(
         field_type,
     };
 
-    let path = match jail_path(file_path) { Ok(p) => p, Err(e) => return Json(json!({"error": e})) };
+    let path = match jail_path(file_path) {
+        Ok(p) => p,
+        Err(e) if e == "file not found" => return Err(api_error(&e, StatusCode::NOT_FOUND)),
+        Err(e) => return Err(api_error(&e, StatusCode::FORBIDDEN)),
+    };
     let packets = match protocol_lab_core::pcap::reader::read_pcap(&path) {
         Ok(p) => p,
-        Err(e) => return Json(json!({"error": e.to_string()})),
+        Err(e) => return Err(api_error(&e.to_string(), StatusCode::BAD_REQUEST)),
     };
 
     let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets);
     if session_idx >= sessions.len() {
-        return Json(json!({"error": "Session not found"}));
+        return Err(api_error("Session not found", StatusCode::NOT_FOUND));
     }
     let session = &sessions[session_idx];
 
@@ -91,10 +95,10 @@ pub(crate) async fn apply_interpretation(
     }).collect();
 
     //платим по долгам
-    Json(json!({
+    Ok(Json(json!({
         "total_messages": results.len(),
         "results": results
-    }))
+    })))
 }
 
 //дал-дал ушел()
@@ -104,11 +108,11 @@ pub(crate) async fn verify_corpus(
 
     let files = match body["files"].as_array() { //пирсинг файлов входных
         Some(arr) => arr.clone(),
-        None => return Json(json!({"error": "files array required"})).into_response(),
+        None => return api_error("files array required", StatusCode::BAD_REQUEST).into_response(),
     };
     
     if files.len() > 8 {
-        return Json(json!({"error": "too many files"})).into_response();
+        return api_error("too many files", StatusCode::BAD_REQUEST).into_response();
     }
     
     let framing_str = body["framing"]["type"].as_str().unwrap_or("fixed");
@@ -116,9 +120,9 @@ pub(crate) async fn verify_corpus(
     let rule_name = body["rule"]["name"].as_str().unwrap_or("unknown");
     let rule_type_str = body["rule"]["type"].as_str().unwrap_or("u8");
     let rule_offset = body["rule"]["offset"].as_u64().unwrap_or(0) as usize;
-    let expected_value = body["expected_value"].as_str().map(|s| s.to_string());
+    let expected_value = body["expected_value"].as_str().or_else(|| body["expectedValue"].as_str()).map(|s| s.to_string());
 
-    let journal_path = body["journal_path"].as_str().map(|s| s.to_string());
+    let journal_path = body["journal_path"].as_str().or_else(|| body["journalPath"].as_str()).map(|s| s.to_string());
     let mut journal_entries: Vec<serde_json::Value> = Vec::new();
     if let Some(j_path) = journal_path {
         if let Some(mut rdr) = jail_path(&j_path).ok().and_then(|jp| csv::Reader::from_path(&jp).ok()) {

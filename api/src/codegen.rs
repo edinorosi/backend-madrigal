@@ -91,6 +91,9 @@ fn rust_condition(rule: &ModelRule) -> String {
     if let Some(m) = rule.condition.max_message_length {
         conds.push(format!("(bytes.len() as u32) <= {m}"));
     }
+    if let Some(mlen) = rule.condition.message_length {
+        conds.push(format!("(bytes.len() as u32) == {mlen}"));
+    }
     if conds.is_empty() {
         "true".to_string()
     } else {
@@ -151,6 +154,9 @@ fn gen_rust(model: &Model) -> String {
         if let Some(m) = rule.condition.max_message_length {
             out.push_str(&format!("            if (total_len as u32) > {m} {{ return None; }}\n"));
         }
+        if let Some(mlen) = rule.condition.message_length {
+            out.push_str(&format!("            if (total_len as u32) != {mlen} {{ return None; }}\n"));
+        }
         out.push_str("        }\n");
     }
     out.push_str("        _ => return None,\n    }\n");
@@ -184,6 +190,9 @@ fn gen_python(model: &Model) -> String {
         }
         if let Some(m) = rule.condition.max_message_length {
             conds.push(format!("len(data) <= {m}"));
+        }
+        if let Some(mlen) = rule.condition.message_length {
+            conds.push(format!("len(data) == {mlen}"));
         }
         let cond = if conds.is_empty() { "True".to_string() } else { conds.join(" and ") };
         out.push_str(&format!("    if not ({cond}):\n        return None\n"));
@@ -235,6 +244,9 @@ fn gen_c(model: &Model) -> String {
         }
         if let Some(m) = rule.condition.max_message_length {
             conds.push(format!("(total <= {m})"));
+        }
+        if let Some(mlen) = rule.condition.message_length {
+            conds.push(format!("(total == {mlen})"));
         }
         let cond = if conds.is_empty() { "1".to_string() } else { conds.join(" && ") };
         out.push_str(&format!("    if (!({cond})) return 0;\n"));
@@ -298,7 +310,7 @@ mod tests {
             rules: vec![ModelRule {
                 id: "r 1".to_string(),
                 name: "R".to_string(),
-                condition: ModelRuleCondition { opcode: Some(1), opcodes: None, length_equals: None, max_message_length: None },
+                condition: ModelRuleCondition { opcode: Some(1), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
                 fields: vec![ModelField {
                     name: "op".to_string(),
                     field_type: "uint8".to_string(),

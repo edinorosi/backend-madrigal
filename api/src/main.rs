@@ -12,6 +12,7 @@ mod models;
 mod observations;
 mod projects;
 mod state;
+mod status;
 
 use axum::{
     routing::{delete, get, post, put},
@@ -19,10 +20,28 @@ use axum::{
 };
 use tower_http::cors::{Any, CorsLayer};
 
-use state::load_store;
+use clap::Parser;
+use state::load_store_in;
+
+/// Флаги запуска: второй изолированный инстанс для скриптов —
+///
+/// cargo run -p protocol-lab-api -- --port 8081 --data-dir /tmp/pl-scripts
+#[derive(Parser)]
+struct Args {
+    /// Адрес бинда.
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+    /// Порт.
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+    /// Корень mutable-стора (captures/*.json, observations/models/checks).
+    #[arg(long, default_value = "data")]
+    data_dir: std::path::PathBuf,
+}
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
     if let Ok(rd) = std::fs::read_dir("/tmp") {
         for e in rd.flatten() {
             let p = e.path();
@@ -33,7 +52,7 @@ async fn main() {
             }
         }
     }
-    let state = std::sync::Arc::new(load_store());
+    let state = std::sync::Arc::new(load_store_in(&args.data_dir));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -41,6 +60,9 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/v1/healthz", get(status::healthz))
+        .route("/api/v1/version", get(status::version))
+        .route("/api/v1/openapi.json", get(status::openapi))
         .route("/api/v1/captures", get(captures::list_captures).post(captures::import_capture))
         .route("/api/v1/captures/:capture_id/sessions", get(captures::list_sessions))
         .route("/api/v1/captures/:capture_id/bytes", get(captures::get_bytes))
@@ -70,8 +92,9 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    println!("🚀 Сервер запущен на http://0.0.0.0:8080");
+    let addr = format!("{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    println!("🚀 Сервер запущен на http://{} (стор: {})", addr, args.data_dir.display());
     axum::serve(listener, app).await.unwrap();
 }
 

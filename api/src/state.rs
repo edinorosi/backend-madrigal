@@ -11,14 +11,16 @@ pub struct AppData {
     pub models: RwLock<HashMap<String, Model>>,
     pub last_check: RwLock<HashMap<String, CheckResult>>,
     pub raw_bytes: RwLock<HashMap<String, Vec<u8>>>, // хранение пустых писи-файлы 
+    pub data_dir: std::path::PathBuf, // корень mutable-стора; остальное (fixtures/patterns/uploads) от cwd
 }
 
 // ВАЖНО: Здесь должно быть AppData, а не AppState, чтобы не было цикла
 pub type AppState = Arc<AppData>;
 
-pub(crate) fn capture_dir(id: &str) -> String { 
-    format!("data/captures/{}", id) 
-} // папка одного capture
+/// Папка одного capture под кастомным корнем стора (--data-dir).
+pub(crate) fn capture_dir_in(base: &std::path::Path, id: &str) -> String {
+    format!("{}/captures/{}", base.to_string_lossy(), id)
+}
 
 pub(crate) fn save_json(path: &str, v: &impl serde::Serialize) { // запись любого стора в JSON
 
@@ -33,7 +35,7 @@ pub(crate) fn save_json(path: &str, v: &impl serde::Serialize) { // запись
 
 
 pub(crate) fn persist_capture(state: &AppState, id: &str) { // сохранить один capture целиком
-    let dir = capture_dir(id);
+    let dir = capture_dir_in(&state.data_dir, id);
 
     if let Some(c) = state.captures.read().unwrap().get(id) { 
         save_json(&format!("{}/meta.json", dir), c); 
@@ -72,27 +74,32 @@ pub(crate) fn persist_global(state: &AppState) { // сохранить набл�
         .values()
         .cloned()
         .collect();
-    save_json("data/observations.json", &obs); 
+    save_json(&format!("{}/observations.json", state.data_dir.to_string_lossy()), &obs); 
     let mods: Vec<Model> = state.models.read()// все модели
         .unwrap()
         .values()
         .cloned()
         .collect(); 
-    save_json("data/models.json", &mods);
-    save_json("data/checks.json", &*state.last_check.read().unwrap()); 
+    save_json(&format!("{}/models.json", state.data_dir.to_string_lossy()), &mods);
+    save_json(&format!("{}/checks.json", state.data_dir.to_string_lossy()), &*state.last_check.read().unwrap()); 
 
 } 
 
 
 pub(crate) fn load_store() -> AppData { // загрузка всего stora
+    load_store_in(std::path::Path::new("data"))
+}
+
+/// Загрузка стора из кастомного корня (--data-dir).
+pub(crate) fn load_store_in(base: &std::path::Path) -> AppData { // загрузка всего stora
     let mut captures = HashMap::new();
     let mut sessions = HashMap::new();
     let mut messages = HashMap::new();
     let mut raw_bytes = HashMap::new();
-    if let Ok(dirs) = std::fs::read_dir("data/captures") {
+    if let Ok(dirs) = std::fs::read_dir(base.join("captures")) {
         for e in dirs.flatten() { // каждая папка
             let id = e.file_name().to_string_lossy().to_string(); // id = имя папки
-            let base = format!("data/captures/{}", id);
+            let base = format!("{}/captures/{}", base.to_string_lossy(), id);
             if let Ok(b) = std::fs::read(format!("{}/meta.json", base)) { if let Ok(c) = serde_json::from_slice::<Capture>(&b) { captures.insert(c.id.clone(), c); } } // мета (ЗАПРЕЩЕНА В РФ)
             if let Ok(b) = std::fs::read(format!("{}/sessions.json", base)) { if let Ok(v) = serde_json::from_slice::<Vec<Session>>(&b) { for s in v { sessions.insert(s.id.clone(), s); } } } // сессии
             if let Ok(b) = std::fs::read(format!("{}/messages.json", base)) { if let Ok(v) = serde_json::from_slice::<Vec<Message>>(&b) { for m in v { messages.insert(m.id.clone(), m); } } } // сообщения
@@ -100,10 +107,10 @@ pub(crate) fn load_store() -> AppData { // загрузка всего stora
         } 
     }
     let mut observations = HashMap::new(); // наблюдения
-    if let Ok(b) = std::fs::read("data/observations.json") { if let Ok(v) = serde_json::from_slice::<Vec<Observation>>(&b) { for o in v { observations.insert(o.id.clone(), o); } } } // грузим наблюдения
+    if let Ok(b) = std::fs::read(base.join("observations.json")) { if let Ok(v) = serde_json::from_slice::<Vec<Observation>>(&b) { for o in v { observations.insert(o.id.clone(), o); } } } // грузим наблюдения
     let mut models = HashMap::new(); // модели
-    if let Ok(b) = std::fs::read("data/models.json") { if let Ok(v) = serde_json::from_slice::<Vec<Model>>(&b) { for m in v { models.insert(m.id.clone(), m); } } } // грузим модели
+    if let Ok(b) = std::fs::read(base.join("models.json")) { if let Ok(v) = serde_json::from_slice::<Vec<Model>>(&b) { for m in v { models.insert(m.id.clone(), m); } } } // грузим модели
     let mut last_check = HashMap::new();
-    if let Ok(b) = std::fs::read("data/checks.json") { if let Ok(v) = serde_json::from_slice::<HashMap<String, CheckResult>>(&b) { last_check = v; } }
-    AppData { captures: RwLock::new(captures), sessions: RwLock::new(sessions), messages: RwLock::new(messages), observations: RwLock::new(observations), models: RwLock::new(models), raw_bytes: RwLock::new(raw_bytes), last_check: RwLock::new(last_check) } // собираем стор
+    if let Ok(b) = std::fs::read(base.join("checks.json")) { if let Ok(v) = serde_json::from_slice::<HashMap<String, CheckResult>>(&b) { last_check = v; } }
+    AppData { captures: RwLock::new(captures), sessions: RwLock::new(sessions), messages: RwLock::new(messages), observations: RwLock::new(observations), models: RwLock::new(models), raw_bytes: RwLock::new(raw_bytes), last_check: RwLock::new(last_check), data_dir: base.to_path_buf() } // собираем стор
 } 

@@ -568,11 +568,11 @@ fn cmd_infer(args: &[&str]) {
     println!("Размечено: {} из {}", with_exp, labeled.len());
 
     let proposals = protocol_lab_core::infer::infer_rules(&labeled);
-    let rules: Vec<serde_json::Value> = proposals.iter().map(|p| {
+    let rules: Vec<serde_json::Value> = proposals.iter().filter(|p| !p.fields.is_empty()).map(|p| {
         serde_json::json!({
             "id": format!("rule-{}", uuid::Uuid::new_v4()),
             "name": match p.opcode { Some(o) => format!("opcode 0x{:02X} / len {}", o, p.length), None => format!("len {}", p.length) },
-            "condition": { "opcode": p.opcode },
+            "condition": { "opcode": p.opcode, "messageLength": p.length },
             "fields": p.fields.iter().map(|f| serde_json::json!({
                 "name": f.name, "type": f.ftype, "offset": f.offset, "length": f.length,
                 "note": format!("{}/{}", f.matches, f.total),
