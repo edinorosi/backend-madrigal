@@ -140,12 +140,21 @@ pub(crate) async fn check_model(
     State(state): State<AppState>,
     Json(body): Json<CheckBody>,
 ) -> Json<CheckResult> {
+    Json(check_capture(&state, &body.capture_id, body.model_id.clone()))
+}
+
+/// Прогон модели по журналу без axum-обёрток — переиспользуется MCP-инструментом.
+pub(crate) fn check_capture(
+    state: &AppState,
+    capture_id: &str,
+    model_id: Option<String>,
+) -> CheckResult {
     let wanted_file = state.captures.read().unwrap()
-        .get(&body.capture_id).map(|c| c.file_name.clone()).unwrap_or_default(); //ищем файлы только со своими действиями
+        .get(capture_id).map(|c| c.file_name.clone()).unwrap_or_default(); //ищем файлы только со своими действиями
     let actions = load_actions(&wanted_file, "fixtures/action_journal.csv");
     let msgs = state.messages.read().unwrap();
-    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == body.capture_id).map(|s| s.id.clone()).collect();
-    let model = match body.model_id.as_ref().and_then(|id| state.models.read().unwrap().get(id).cloned()) {
+    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == capture_id).map(|s| s.id.clone()).collect();
+    let model = match model_id.as_ref().and_then(|id| state.models.read().unwrap().get(id).cloned()) {
         Some(m) => Some(m),
         None => state.models.read().unwrap().values().next().cloned(),
     };
@@ -154,7 +163,7 @@ pub(crate) async fn check_model(
         let hit = find_message(&msgs, &sids, *start_us, *end_us);
         let (status, extracted, mid) = match (hit, model.as_ref()) {
             (Some(m), Some(md)) => {
-                let bytes = message_bytes(&state, m);
+                let bytes = message_bytes(state, m);
                 let (fields, interpretation, _) = apply_rules_to_bytes(&bytes, md);
                 if interpretation == "not-parsed" {
                     ("unknown", "-".to_string(), Some(m.id.clone()))
@@ -179,11 +188,17 @@ pub(crate) async fn check_model(
     let partial = rows.iter().filter(|r| r.status == "partial").count() as u32;
     let error = rows.iter().filter(|r| r.status == "error").count() as u32;
     let unknown = total - ok - partial - error;
-    state.last_check.write().unwrap().insert(body.capture_id.clone(), CheckResult { rows: rows.clone(), summary: CheckSummary { total, ok, partial, unknown, error }, model_id: body.model_id.clone(), model_name: None });
-    Json(CheckResult {
+    let known = state.captures.read().unwrap().contains_key(capture_id);
+    let result = CheckResult {
         rows,
         summary: CheckSummary { total, ok, partial, unknown, error },
-        model_id: body.model_id,
+        model_id,
         model_name: None,
-    })
+    };
+    // last_check — только для известных записей: иначе report/generate
+    // находит чужой мусор по never-импортированному id
+    if known {
+        state.last_check.write().unwrap().insert(capture_id.to_string(), result.clone());
+    }
+    result
 }

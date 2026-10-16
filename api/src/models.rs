@@ -6,6 +6,7 @@ use axum::{
 
 use crate::dto::Model;
 use crate::error::api_error;
+pub(crate) use crate::field_types::{decode_number, format_field_value};
 use crate::state::{persist_capture, persist_global, AppState};
 
 fn rule_matches(bytes: &[u8], cond: &crate::dto::ModelRuleCondition) -> bool {
@@ -43,6 +44,21 @@ fn rule_matches(bytes: &[u8], cond: &crate::dto::ModelRuleCondition) -> bool {
             return false;
         }
     }
+    if let Some(terms) = cond.terms.as_ref() {
+        for t in terms {
+            let off = t.offset as usize;
+            if off >= bytes.len() {
+                return false;
+            }
+            let expected = match crate::field_types::parse_expected(&t.term_type, &t.equals) {
+                Some(e) => e,
+                None => return false,
+            };
+            if !crate::field_types::bytes_match(&bytes[off..], &t.term_type, &expected) {
+                return false;
+            }
+        }
+    }
     true
 }
 
@@ -60,43 +76,6 @@ fn resolve_length(v: &serde_json::Value, offset: usize, total: usize) -> Option<
         serde_json::Value::String(s) if s == "rest" => Some(total as isize - offset as isize),
         serde_json::Value::String(s) if s == "rest-2" => Some(total as isize - offset as isize - 2),
         _ => None,
-    }
-}
-
-fn format_field_value(bytes: &[u8], ftype: &str) -> String {
-    match ftype {
-        "uint8" => {
-            if bytes.is_empty() {
-                return "—".to_string();
-            }
-            format!("0x{:02X}", bytes[0])
-        }
-        "uint16be" => {
-            if bytes.len() < 2 {
-                return "—".to_string();
-            }
-            format!("0x{:04X}", u16::from_be_bytes([bytes[0], bytes[1]]))
-        }
-        "uint32be" => {
-            if bytes.len() < 4 {
-                return "—".to_string();
-            }
-            format!(
-                "0x{:08X}",
-                u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            )
-        }
-        "string" => bytes
-            .iter()
-            .map(|b| {
-                if (0x20..=0x7e).contains(b) {
-                    *b as char
-                } else {
-                    '·'
-                }
-            })
-            .collect(),
-        _ => format!("{} Б", bytes.len()),
     }
 }
 
@@ -171,17 +150,6 @@ pub(crate) fn message_bytes(state: &crate::state::AppState, msg: &crate::dto::Me
     if start >= stream.len() { Vec::new() } else { stream[start..end].to_vec() }
 }
 
-pub(crate) fn decode_number(bytes: &[u8], ftype: &str) -> Option<f64> {
-    match ftype {
-        "uint8" => bytes.first().map(|b| *b as f64),
-        "uint16be" => (bytes.len() >= 2).then(|| u16::from_be_bytes([bytes[0], bytes[1]]) as f64),
-        "uint16le" => (bytes.len() >= 2).then(|| u16::from_le_bytes([bytes[0], bytes[1]]) as f64),
-        "uint32be" => (bytes.len() >= 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64),
-        "uint32le" => (bytes.len() >= 4).then(|| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64),
-        _ => None,
-    }
-}
-
 #[derive(serde::Deserialize)]
 #[allow(non_snake_case)]
 pub(crate) struct ApplyBody { modelId: Option<String>, model_id: Option<String> }
@@ -192,13 +160,24 @@ pub(crate) async fn apply_model(
     Json(body): Json<ApplyBody>,
 ) -> Json<Vec<crate::dto::MessageField>> {
     let mid = body.modelId.or(body.model_id).unwrap_or_default();
+    Json(apply_to_message(&state, &message_id, &mid).unwrap_or_default())
+}
+
+/// Применение модели к сообщению без axum-обёрток — переиспользуется MCP-инструментом.
+/// Err — нет модели/сообщения (для MCP это not-found, а не пустой разбор).
+pub(crate) fn apply_to_message(
+    state: &AppState,
+    message_id: &str,
+    model_id: &str,
+) -> Result<Vec<crate::dto::MessageField>, String> {
+    let mid = model_id.to_string();
     let model = match state.models.read().unwrap().get(&mid).cloned() {
         Some(m) => m,
-        None => return Json(vec![]),
+        None => return Err("Model not found".to_string()),
     };
-    let msg = match state.messages.read().unwrap().get(&message_id).cloned() {
+    let msg = match state.messages.read().unwrap().get(message_id).cloned() {
         Some(m) => m,
-        None => return Json(vec![]),
+        None => return Err("Message not found".to_string()),
     };
     let bytes: Vec<u8> = state
         .sessions
@@ -222,16 +201,16 @@ pub(crate) async fn apply_model(
     } else {
         interpretation.clone()
     };
-    if let Some(stored) = state.messages.write().unwrap().get_mut(&message_id) {
+    if let Some(stored) = state.messages.write().unwrap().get_mut(message_id) {
         stored.fields = fields.clone();
         stored.status = status;
         stored.interpretation = interpretation;
         stored.model_id = Some(mid.clone());
     }
     if let Some(sess) = state.sessions.read().unwrap().get(&msg.session_id) {
-        persist_capture(&state, &sess.capture_id);
+        persist_capture(state, &sess.capture_id);
     }
-    Json(fields)
+    Ok(fields)
 }
 
 pub(crate) async fn list_models(State(state): State<AppState>) -> Json<Vec<Model>> {
@@ -240,14 +219,55 @@ pub(crate) async fn list_models(State(state): State<AppState>) -> Json<Vec<Model
     Json(list)
 }
 
+fn validate_model(model: &Model) -> Result<(), String> {
+    for rule in &model.rules {
+        for f in &rule.fields {
+            if !crate::field_types::is_known_type(&f.field_type) {
+                return Err(format!(
+                    "Unknown field type {:?} in rule {:?}. Known: {}",
+                    f.field_type,
+                    rule.name,
+                    crate::field_types::known_types_list()
+                ));
+            }
+        }
+        if let Some(terms) = rule.condition.terms.as_ref() {
+            for (i, t) in terms.iter().enumerate() {
+                if !crate::field_types::is_known_type(&t.term_type) {
+                    return Err(format!(
+                        "Unknown condition type {:?} in rule {:?} term #{}. Known: {}",
+                        t.term_type,
+                        rule.name,
+                        i,
+                        crate::field_types::known_types_list()
+                    ));
+                }
+                if crate::field_types::parse_expected(&t.term_type, &t.equals).is_none() {
+                    return Err(format!(
+                        "Bad equals {:?} for type {:?} in rule {:?} term #{}",
+                        t.equals, t.term_type, rule.name, i
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn save_model(
     State(state): State<AppState>,
     Json(mut model): Json<Model>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    store_model(&state, &mut model).map_err(|e| api_error(&e, StatusCode::BAD_REQUEST))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+/// Валидация + вставка + персист без axum-обёрток — переиспользуется MCP-инструментом.
+pub(crate) fn store_model(state: &AppState, model: &mut Model) -> Result<(), String> {
+    validate_model(model)?;
     model.updated_at = chrono::Utc::now().to_rfc3339();
-    state.models.write().unwrap().insert(model.id.clone(), model);
-    persist_global(&state);
-    StatusCode::NO_CONTENT
+    state.models.write().unwrap().insert(model.id.clone(), model.clone());
+    persist_global(state);
+    Ok(())
 }
 
 pub(crate) async fn remove_model(
@@ -292,7 +312,7 @@ mod tests {
             rules: vec![crate::dto::ModelRule {
                 id: "r".to_string(),
                 name: "R".to_string(),
-                condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
+                condition: ModelRuleCondition { terms: None, opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
                 fields: vec![
                     ModelField { name: "marker".to_string(), field_type: "bytes".to_string(), offset: serde_json::Value::from(0), length: serde_json::Value::from(2), note: None },
                     ModelField { name: "op".to_string(), field_type: "uint8".to_string(), offset: serde_json::Value::from(2), length: serde_json::Value::from(1), note: None },
@@ -316,7 +336,7 @@ mod tests {
         assert_eq!(fields[2].value, "0x0002");
         for f in &fields {
             let back = decode_number(&bytes[f.range.offset as usize..(f.range.offset + f.range.length) as usize], &f.field_type);
-            if ["uint8", "uint16be", "uint16le", "uint32be", "uint32le"].contains(&f.field_type.as_str()) {
+            if ["uint8", "int8", "uint16be", "uint16le", "int16be", "int16le", "uint32be", "uint32le", "int32be", "int32le"].contains(&f.field_type.as_str()) {
                 assert!(back.is_some());
             } else {
                 assert!(back.is_none());
@@ -330,7 +350,7 @@ mod tests {
         md.rules.push(crate::dto::ModelRule {
             id: "r-long".to_string(),
             name: "R-long".to_string(),
-            condition: ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(9) },
+            condition: ModelRuleCondition { terms: None, opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(9) },
             fields: vec![],
         });
         // короткое сообщение: первое правило (без message_length) срабатывает
@@ -340,9 +360,59 @@ mod tests {
         assert_eq!(rule.as_deref(), Some("r"));
         // длинное сообщение opcode 0x01: первое правило тоже матчится (порядок),
         // а правило с чужой длиной — нет
-        let cond = ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(100) };
+        let cond = ModelRuleCondition { terms: None, opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(100) };
         assert!(!rule_matches(&short, &cond));
-        assert!(rule_matches(&short, &ModelRuleCondition { opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(short.len() as u32) }));
+        assert!(rule_matches(&short, &ModelRuleCondition { terms: None, opcode: Some(0x01), opcodes: None, length_equals: None, max_message_length: None, message_length: Some(short.len() as u32) }));
+    }
+
+    #[test]
+    fn custom_terms_match() {
+        let term = |t: &str, o: u32, e: &str| crate::dto::CondTerm { offset: o, term_type: t.to_string(), equals: e.to_string() };
+        let cond = ModelRuleCondition {
+            terms: Some(vec![
+                term("uint8", 2, "0x01"),
+                term("uint16be", 3, "2"),
+                term("string", 5, "AB"),
+            ]),
+            opcode: None, opcodes: None, length_equals: None, max_message_length: None, message_length: None,
+        };
+        let mut bytes = frame(0x01, &[0x07, 0x08]);
+        // frame: AA 55 01 00 02 07 08 crc — подправим payload под string-терм
+        bytes[5] = b'A';
+        bytes[6] = b'B';
+        assert!(rule_matches(&bytes, &cond));
+        let bad = ModelRuleCondition {
+            terms: Some(vec![term("uint8", 2, "0x02")]),
+            opcode: None, opcodes: None, length_equals: None, max_message_length: None, message_length: None,
+        };
+        assert!(!rule_matches(&bytes, &bad));
+        // выход за границы и мусорный equals — несовпадение, не паника
+        let oob = ModelRuleCondition {
+            terms: Some(vec![term("uint8", 100, "1")]),
+            opcode: None, opcodes: None, length_equals: None, max_message_length: None, message_length: None,
+        };
+        assert!(!rule_matches(&bytes, &oob));
+        let garbage = ModelRuleCondition {
+            terms: Some(vec![term("uint8", 2, "xyz")]),
+            opcode: None, opcodes: None, length_equals: None, max_message_length: None, message_length: None,
+        };
+        assert!(!rule_matches(&bytes, &garbage));
+    }
+
+    #[test]
+    fn validate_model_rejects_unknown_types() {
+        let mut md = model();
+        assert!(validate_model(&md).is_ok());
+        md.rules[0].fields[0].field_type = "u8".to_string();
+        assert!(validate_model(&md).is_err());
+        md.rules[0].fields[0].field_type = "int16le".to_string();
+        assert!(validate_model(&md).is_ok());
+        md.rules[0].condition.terms = Some(vec![crate::dto::CondTerm { offset: 0, term_type: "u8".to_string(), equals: "1".to_string() }]);
+        assert!(validate_model(&md).is_err());
+        md.rules[0].condition.terms = Some(vec![crate::dto::CondTerm { offset: 0, term_type: "uint8".to_string(), equals: "999".to_string() }]);
+        assert!(validate_model(&md).is_err());
+        md.rules[0].condition.terms = Some(vec![crate::dto::CondTerm { offset: 0, term_type: "uint8".to_string(), equals: "0x01".to_string() }]);
+        assert!(validate_model(&md).is_ok());
     }
 
     #[test]

@@ -47,31 +47,28 @@ fn length_expr(length: &Value, off: &str) -> String {
     }
 }
 
-fn rust_type(ftype: &str) -> &str {
-    match ftype {
-        "uint8" => "u8",
-        "uint16be" | "uint16le" => "u16",
-        "uint32be" | "uint32le" => "u32",
-        "string" => "String",
-        _ => "Vec<u8>",
-    }
-}
-
 fn rust_decode_field(f: &ModelField) -> String {
     let off = offset_expr(&f.offset);
     let len = length_expr(&f.length, &off);
     let conv = match f.field_type.as_str() {
-        "uint8" => "bytes[o] as u64".to_string(),
-        "uint16be" => "u16::from_be_bytes([bytes[o], bytes[o + 1]]) as u64".to_string(),
-        "uint16le" => "u16::from_le_bytes([bytes[o], bytes[o + 1]]) as u64".to_string(),
-        "uint32be" => "u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as u64".to_string(),
-        "uint32le" => "u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as u64".to_string(),
+        "uint8" => "bytes[o] as i64".to_string(),
+        "int8" => "(bytes[o] as i8) as i64".to_string(),
+        "uint16be" => "u16::from_be_bytes([bytes[o], bytes[o + 1]]) as i64".to_string(),
+        "uint16le" => "u16::from_le_bytes([bytes[o], bytes[o + 1]]) as i64".to_string(),
+        "int16be" => "i16::from_be_bytes([bytes[o], bytes[o + 1]]) as i64".to_string(),
+        "int16le" => "i16::from_le_bytes([bytes[o], bytes[o + 1]]) as i64".to_string(),
+        "uint32be" => "u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as i64".to_string(),
+        "uint32le" => "u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as i64".to_string(),
+        "int32be" => "i32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as i64".to_string(),
+        "int32le" => "i32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) as i64".to_string(),
         "string" => "String::from_utf8_lossy(&bytes[o..o + l]).into_owned()".to_string(),
+        "hex" => "bytes[o..o + l].iter().map(|b| format!(\"{:02X}\", b)).collect::<Vec<_>>().join(\" \")".to_string(),
         _ => "bytes[o..o + l].to_vec()".to_string(),
     };
     let store = match f.field_type.as_str() {
-        "string" => "FieldValue::Text(v)".to_string(),
-        "uint8" | "uint16be" | "uint16le" | "uint32be" | "uint32le" => "FieldValue::Num(v)".to_string(),
+        "string" | "hex" => "FieldValue::Text(v)".to_string(),
+        "uint8" | "int8" | "uint16be" | "uint16le" | "int16be" | "int16le"
+        | "uint32be" | "uint32le" | "int32be" | "int32le" => "FieldValue::Num(v)".to_string(),
         _ => "FieldValue::Bytes(v)".to_string(),
     };
     format!("    let (o, l) = ({off} as usize, {len} as usize);\n    if o + l <= total {{\n        let v = {conv};\n        fields.push(Field {{ name: \"{n}\", value: {store} }});\n    }}", n = f.name)
@@ -81,8 +78,7 @@ fn rust_condition(rule: &ModelRule) -> String {
     let mut conds = Vec::new();
     if let Some(o) = rule.condition.opcode {
         conds.push(format!("bytes.get(2) == Some(&{o})"));
-    }
-    if let Some(ref ops) = rule.condition.opcodes {
+    }    if let Some(ref ops) = rule.condition.opcodes {
         conds.push(format!("matches!(bytes.get(2), Some(x) if [{list}].contains(x))", list = ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", ")));
     }
     if let Some(le) = rule.condition.length_equals {
@@ -94,6 +90,11 @@ fn rust_condition(rule: &ModelRule) -> String {
     if let Some(mlen) = rule.condition.message_length {
         conds.push(format!("(bytes.len() as u32) == {mlen}"));
     }
+    if let Some(ref terms) = rule.condition.terms {
+        for t in terms {
+            conds.push(rust_term(&t.term_type, t.offset, &t.equals));
+        }
+    }
     if conds.is_empty() {
         "true".to_string()
     } else {
@@ -101,11 +102,41 @@ fn rust_condition(rule: &ModelRule) -> String {
     }
 }
 
+/// Один кастомный term в Rust: декодировать срез и сравнить.
+/// Невалидный term (не прошёл валидацию save_model) — `false`, правило мёртвое.
+fn rust_term(ftype: &str, offset: u32, equals: &str) -> String {
+    let o = offset as usize;
+    match crate::field_types::parse_expected(ftype, equals) {
+        Some(crate::field_types::ExpectedValue::Num(v)) => {
+            let (need, dec) = match ftype {
+                "uint8" => (1, format!("bytes[{o}] as i64")),
+                "int8" => (1, format!("(bytes[{o}] as i8) as i64")),
+                "uint16be" => (2, format!("u16::from_be_bytes([bytes[{o}], bytes[{o} + 1]]) as i64")),
+                "uint16le" => (2, format!("u16::from_le_bytes([bytes[{o}], bytes[{o} + 1]]) as i64")),
+                "int16be" => (2, format!("i16::from_be_bytes([bytes[{o}], bytes[{o} + 1]]) as i64")),
+                "int16le" => (2, format!("i16::from_le_bytes([bytes[{o}], bytes[{o} + 1]]) as i64")),
+                "uint32be" => (4, format!("u32::from_be_bytes([bytes[{o}], bytes[{o} + 1], bytes[{o} + 2], bytes[{o} + 3]]) as i64")),
+                "uint32le" => (4, format!("u32::from_le_bytes([bytes[{o}], bytes[{o} + 1], bytes[{o} + 2], bytes[{o} + 3]]) as i64")),
+                "int32be" => (4, format!("i32::from_be_bytes([bytes[{o}], bytes[{o} + 1], bytes[{o} + 2], bytes[{o} + 3]]) as i64")),
+                "int32le" => (4, format!("i32::from_le_bytes([bytes[{o}], bytes[{o} + 1], bytes[{o} + 2], bytes[{o} + 3]]) as i64")),
+                _ => return "false".to_string(),
+            };
+            format!("(bytes.len() >= {o} + {need} && {dec} == {v})")
+        }
+        Some(crate::field_types::ExpectedValue::Bytes(want)) => {
+            let list = want.iter().map(|b| format!("0x{:02X}", b)).collect::<Vec<_>>().join(", ");
+            let l = want.len();
+            format!("(bytes.len() >= {o} + {l} && bytes[{o}..].starts_with(&[{list}]))")
+        }
+        None => "false".to_string(),
+    }
+}
+
 fn gen_rust(model: &Model) -> String {
     let mut out = String::new();
     out.push_str(&format!("// auto-generated from model \"{}\" ({})\n", model.name, model.id));
     out.push_str("// semantics mirror apply_rules_to_bytes: first matching rule wins, opcode = byte 2, length = u16be at 3\n\n");
-    out.push_str("#[derive(Debug, Clone, PartialEq)]\npub enum FieldValue { Num(u64), Bytes(Vec<u8>), Text(String) }\n\n");
+    out.push_str("#[derive(Debug, Clone, PartialEq)]\npub enum FieldValue { Num(i64), Bytes(Vec<u8>), Text(String) }\n\n");
     out.push_str("#[derive(Debug, Clone, PartialEq)]\npub struct Field { pub name: &'static str, pub value: FieldValue }\n\n");
     out.push_str("#[derive(Debug, Clone, PartialEq)]\npub struct Decoded { pub rule: &'static str, pub fields: Vec<Field> }\n\n");
     for rule in &model.rules {
@@ -171,6 +202,35 @@ fn gen_rust(model: &Model) -> String {
     out
 }
 
+/// Один кастомный term в Python. Невалидный — `False`, правило мёртвое.
+fn python_term(ftype: &str, offset: u32, equals: &str) -> String {
+    let o = offset as usize;
+    match crate::field_types::parse_expected(ftype, equals) {
+        Some(crate::field_types::ExpectedValue::Num(v)) => {
+            let (need, dec) = match ftype {
+                "uint8" => (1, format!("data[{o}]")),
+                "int8" => (1, format!("int.from_bytes(data[{o}:{o}+1], 'big', signed=True)")),
+                "uint16be" => (2, format!("int.from_bytes(data[{o}:{o}+2], 'big')")),
+                "uint16le" => (2, format!("int.from_bytes(data[{o}:{o}+2], 'little')")),
+                "int16be" => (2, format!("int.from_bytes(data[{o}:{o}+2], 'big', signed=True)")),
+                "int16le" => (2, format!("int.from_bytes(data[{o}:{o}+2], 'little', signed=True)")),
+                "uint32be" => (4, format!("int.from_bytes(data[{o}:{o}+4], 'big')")),
+                "uint32le" => (4, format!("int.from_bytes(data[{o}:{o}+4], 'little')")),
+                "int32be" => (4, format!("int.from_bytes(data[{o}:{o}+4], 'big', signed=True)")),
+                "int32le" => (4, format!("int.from_bytes(data[{o}:{o}+4], 'little', signed=True)")),
+                _ => return "False".to_string(),
+            };
+            format!("(len(data) >= {o} + {need} and {dec} == {v})")
+        }
+        Some(crate::field_types::ExpectedValue::Bytes(want)) => {
+            let list = want.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ");
+            let l = want.len();
+            format!("(len(data) >= {o} + {l} and list(data[{o}:{o}+{l}]) == [{list}])")
+        }
+        None => "False".to_string(),
+    }
+}
+
 fn gen_python(model: &Model) -> String {
     let mut out = String::new();
     out.push_str(&format!("# auto-generated from model \"{}\" ({})\n", model.name, model.id));
@@ -194,6 +254,11 @@ fn gen_python(model: &Model) -> String {
         if let Some(mlen) = rule.condition.message_length {
             conds.push(format!("len(data) == {mlen}"));
         }
+        if let Some(ref terms) = rule.condition.terms {
+            for t in terms {
+                conds.push(python_term(&t.term_type, t.offset, &t.equals));
+            }
+        }
         let cond = if conds.is_empty() { "True".to_string() } else { conds.join(" and ") };
         out.push_str(&format!("    if not ({cond}):\n        return None\n"));
         out.push_str("    total = len(data)\n    fields = {}\n");
@@ -202,11 +267,17 @@ fn gen_python(model: &Model) -> String {
             let len = length_expr(&f.length, &off).replace("total", "total");
             let conv = match f.field_type.as_str() {
                 "uint8" => "data[o]",
+                "int8" => "int.from_bytes(data[o:o+1], 'big', signed=True)",
                 "uint16be" => "int.from_bytes(data[o:o+2], 'big')",
                 "uint16le" => "int.from_bytes(data[o:o+2], 'little')",
+                "int16be" => "int.from_bytes(data[o:o+2], 'big', signed=True)",
+                "int16le" => "int.from_bytes(data[o:o+2], 'little', signed=True)",
                 "uint32be" => "int.from_bytes(data[o:o+4], 'big')",
                 "uint32le" => "int.from_bytes(data[o:o+4], 'little')",
+                "int32be" => "int.from_bytes(data[o:o+4], 'big', signed=True)",
+                "int32le" => "int.from_bytes(data[o:o+4], 'little', signed=True)",
                 "string" => "data[o:o+l].decode('utf-8', 'replace')",
+                "hex" => "data[o:o+l].hex(' ').upper()",
                 _ => "bytes(data[o:o+l])",
             };
             out.push_str(&format!("    o, l = {off}, {len}\n    fields[{fname:?}] = {conv} if o + l <= total and l >= 0 and o >= 0 else None\n", fname = f.name));
@@ -222,8 +293,36 @@ fn gen_python(model: &Model) -> String {
     out
 }
 
-fn gen_c(model: &Model) -> String {
-    let mut out = String::new();
+/// Один кастомный term в C (сравнение в int64, байты — memcmp). Невалидный — `0`.
+fn c_term(ftype: &str, offset: u32, equals: &str) -> String {
+    let o = offset as usize;
+    match crate::field_types::parse_expected(ftype, equals) {
+        Some(crate::field_types::ExpectedValue::Num(v)) => {
+            let (need, dec) = match ftype {
+                "uint8" => (1, format!("(int64_t)data[{o}]")),
+                "int8" => (1, format!("(int64_t)(int8_t)data[{o}]")),
+                "uint16be" => (2, format!("(int64_t)pl_u16be(data + {o})")),
+                "uint16le" => (2, format!("(int64_t)(data[{o}] | ((uint64_t)data[{o}+1] << 8))")),
+                "int16be" => (2, format!("(int64_t)(int16_t)((data[{o}] << 8) | data[{o}+1])")),
+                "int16le" => (2, format!("(int64_t)(int16_t)(data[{o}] | (data[{o}+1] << 8))")),
+                "uint32be" => (4, format!("(int64_t)pl_u32be(data + {o})")),
+                "uint32le" => (4, format!("(int64_t)(data[{o}] | ((uint64_t)data[{o}+1] << 8) | ((uint64_t)data[{o}+2] << 16) | ((uint64_t)data[{o}+3] << 24))")),
+                "int32be" => (4, format!("(int64_t)(int32_t)(((uint32_t)data[{o}] << 24) | ((uint32_t)data[{o}+1] << 16) | ((uint32_t)data[{o}+2] << 8) | data[{o}+3])")),
+                "int32le" => (4, format!("(int64_t)(int32_t)(data[{o}] | ((uint32_t)data[{o}+1] << 8) | ((uint32_t)data[{o}+2] << 16) | ((uint32_t)data[{o}+3] << 24))")),
+                _ => return "0".to_string(),
+            };
+            format!("(total >= {o} + {need} && {dec} == (int64_t){v})")
+        }
+        Some(crate::field_types::ExpectedValue::Bytes(want)) => {
+            let list = want.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ");
+            let l = want.len();
+            format!("(total >= {o} + {l} && memcmp(data + {o}, (uint8_t[]){{{list}}}, {l}) == 0)")
+        }
+        None => "0".to_string(),
+    }
+}
+
+fn gen_c(model: &Model) -> String {    let mut out = String::new();
     out.push_str(&format!("/* auto-generated from model \"{}\" ({}) */\n", model.name, model.id));
     out.push_str("/* first matching rule wins; opcode = byte 2, length = u16be at 3 */\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n\n");
     out.push_str("#define PL_MAX_FIELDS 16\n\ntypedef struct { const char *name; uint64_t num; const uint8_t *bytes; size_t len; int is_num; } pl_field_t;\ntypedef struct { const char *rule; pl_field_t fields[PL_MAX_FIELDS]; size_t nfields; } pl_decoded_t;\n\n");
@@ -248,6 +347,11 @@ fn gen_c(model: &Model) -> String {
         if let Some(mlen) = rule.condition.message_length {
             conds.push(format!("(total == {mlen})"));
         }
+        if let Some(ref terms) = rule.condition.terms {
+            for t in terms {
+                conds.push(c_term(&t.term_type, t.offset, &t.equals));
+            }
+        }
         let cond = if conds.is_empty() { "1".to_string() } else { conds.join(" && ") };
         out.push_str(&format!("    if (!({cond})) return 0;\n"));
         for f in &rule.fields {
@@ -256,10 +360,15 @@ fn gen_c(model: &Model) -> String {
             out.push_str(&format!("    {{ long o = (long)({off}); long l = (long)({len}); if (o >= 0 && l >= 0 && (size_t)(o + l) <= total && n < PL_MAX_FIELDS) {{ pl_field_t *fl = &out->fields[n++]; fl->name = {fname:?}; ", fname = f.name));
             let body = match f.field_type.as_str() {
                 "uint8" => "fl->num = data[o]; fl->is_num = 1;".to_string(),
+                "int8" => "fl->num = (uint64_t)(int64_t)(int8_t)data[o]; fl->is_num = 1;".to_string(),
                 "uint16be" => "if (l >= 2) { fl->num = pl_u16be(data + o); fl->is_num = 1; } else { n--; }".to_string(),
                 "uint16le" => "if (l >= 2) { fl->num = data[o] | ((uint64_t)data[o+1] << 8); fl->is_num = 1; } else { n--; }".to_string(),
+                "int16be" => "if (l >= 2) { fl->num = (uint64_t)(int64_t)(int16_t)((data[o] << 8) | data[o+1]); fl->is_num = 1; } else { n--; }".to_string(),
+                "int16le" => "if (l >= 2) { fl->num = (uint64_t)(int64_t)(int16_t)(data[o] | (data[o+1] << 8)); fl->is_num = 1; } else { n--; }".to_string(),
                 "uint32be" => "if (l >= 4) { fl->num = pl_u32be(data + o); fl->is_num = 1; } else { n--; }".to_string(),
                 "uint32le" => "if (l >= 4) { fl->num = data[o] | ((uint64_t)data[o+1] << 8) | ((uint64_t)data[o+2] << 16) | ((uint64_t)data[o+3] << 24); fl->is_num = 1; } else { n--; }".to_string(),
+                "int32be" => "if (l >= 4) { fl->num = (uint64_t)(int64_t)(int32_t)(((uint32_t)data[o] << 24) | ((uint32_t)data[o+1] << 16) | ((uint32_t)data[o+2] << 8) | data[o+3]); fl->is_num = 1; } else { n--; }".to_string(),
+                "int32le" => "if (l >= 4) { fl->num = (uint64_t)(int64_t)(int32_t)(data[o] | ((uint32_t)data[o+1] << 8) | ((uint32_t)data[o+2] << 16) | ((uint32_t)data[o+3] << 24)); fl->is_num = 1; } else { n--; }".to_string(),
                 _ => "fl->bytes = data + o; fl->len = (size_t)l; fl->is_num = 0;".to_string(),
             };
             out.push_str(&body);
@@ -287,12 +396,17 @@ pub(crate) async fn codegen(
         None => return Err(api_error("Model not found", StatusCode::NOT_FOUND)),
     };
     let lang = params.get("lang").map(|s| s.as_str()).unwrap_or("rust");
+    Ok(Json(render_codegen(&model, lang)))
+}
+
+/// Генерация декодера без axum-обёрток — переиспользуется MCP-инструментом.
+pub(crate) fn render_codegen(model: &Model, lang: &str) -> Value {
     let (code, filename) = match lang {
-        "python" | "py" => (gen_python(&model), format!("model_{}.py", ident(&model.id))),
-        "c" => (gen_c(&model), format!("model_{}.c", ident(&model.id))),
-        _ => (gen_rust(&model), format!("model_{}.rs", ident(&model.id))),
+        "python" | "py" => (gen_python(model), format!("model_{}.py", ident(&model.id))),
+        "c" => (gen_c(model), format!("model_{}.c", ident(&model.id))),
+        _ => (gen_rust(model), format!("model_{}.rs", ident(&model.id))),
     };
-    Ok(Json(json!({ "lang": lang, "filename": filename, "code": code })))
+    json!({ "lang": lang, "filename": filename, "code": code })
 }
 
 #[cfg(test)]
@@ -310,7 +424,7 @@ mod tests {
             rules: vec![ModelRule {
                 id: "r 1".to_string(),
                 name: "R".to_string(),
-                condition: ModelRuleCondition { opcode: Some(1), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
+                condition: ModelRuleCondition { terms: None, opcode: Some(1), opcodes: None, length_equals: None, max_message_length: None, message_length: None },
                 fields: vec![ModelField {
                     name: "op".to_string(),
                     field_type: "uint8".to_string(),

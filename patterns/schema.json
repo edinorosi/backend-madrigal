@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Паттерн анализа (backend/patterns/*.json)",
+  "type": "object",
+  "required": ["id", "kind", "params"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Уникальный id файла. Три штатных id работают и без detector (legacy)."
+    },
+    "name": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Вид детектора, сейчас всегда framing."
+    },
+    "detector": {
+      "type": "string",
+      "enum": ["fixed-size", "length-prefixed", "sync-word"],
+      "description": "Какой движок выполняет файл. Свой id + известный detector заводится без правки кода."
+    },
+    "version": { "type": "integer" },
+    "enabled": { "type": "boolean", "default": true },
+    "params": {
+      "type": "object",
+      "description": "Параметры движка. fixed-size: sizes[], min_messages, confidence. length-prefixed: prefix_bytes[], max_len, min_messages, min_rate, confidence. sync-word: words[] (hex-пары), min_count, confidence."
+    },
+    "output": { "type": "object" }
+  }
+}

@@ -2,6 +2,7 @@
   "id": "sync-word",
   "name": "Синхрослово",
   "kind": "framing",
+  "detector": "sync-word",
   "version": 1,
   "enabled": true,
   "params": {

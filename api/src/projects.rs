@@ -84,47 +84,61 @@ pub(crate) async fn upload_capture(
     AxumPath(id): AxumPath<String>,
     mut form: Multipart 
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    if !state.captures.read().unwrap().contains_key(&id) {
+        return Err(api_error("Project not found", StatusCode::NOT_FOUND));
+    }
     let _ = std::fs::create_dir_all("uploads");
     
     let mut saved_file_path = String::from("uploads/unknown.pcap");
+    let mut file_bytes: Vec<u8> = Vec::new();
 
     // Проходим по полям по полям синий трактор едет к нам
     while let Ok(Some(field)) = form.next_field().await {
         let raw_name = field.file_name().unwrap_or("upload.pcap").to_string(); //деаноним имя файла
         let file_name = StdPath::new(&raw_name).file_name().and_then(|n| n.to_str()).unwrap_or("upload.pcap"); // только имя, без ../../
         
-        let data = field.bytes().await.unwrap_or_default(); // записываем байты в дату переменную йо
+        let data = field.bytes().await.unwrap_or_default().to_vec(); // записываем байты в дату переменную йо
 
         saved_file_path = format!("uploads/{}", file_name); //генерируем путь истинный
 
         let _ = std::fs::write(&saved_file_path, &data); // сохран
+        file_bytes = data;
+    }
+    if file_bytes.is_empty() {
+        return Err(api_error("File is empty or missing", StatusCode::BAD_REQUEST));
     }
 
-    let path = StdPath::new(&saved_file_path);
+    let packets = match protocol_lab_core::pcap::reader::read_pcap(StdPath::new(&saved_file_path)) { //читаем файл пакетов с продуктами
+        Ok(p) => p,
+        Err(e) => return Err(api_error(&format!("Ошибка чтения pcap: {}", e), StatusCode::BAD_REQUEST)),
+    };
+    let sessions_core = protocol_lab_core::pcap::session::group_into_sessions(&packets); //отденьно отсордировываем по группам пакеты чтобы не было мешанины
 
-    match protocol_lab_core::pcap::reader::read_pcap(path) { //читаем файл пакетов с продуктами
-        Ok(packets) => {
-            let sessions = protocol_lab_core::pcap::session::group_into_sessions(&packets); //отденьно отсордировываем по группам пакеты чтобы не было мешанины
+    // чистим старые данные проекта (как remove_capture, но саму запись оставляем)
+    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == id).map(|s| s.id.clone()).collect();
+    state.messages.write().unwrap().retain(|_, m| !sids.contains(&m.session_id));
+    state.sessions.write().unwrap().retain(|_, s| s.capture_id != id);
+    state.raw_bytes.write().unwrap().remove(&id);
+    state.last_check.write().unwrap().remove(&id);
 
-            if let Ok(mut captures) = state.captures.write() {
-                if let Some(capture) = captures.get_mut(&id) { 
-                    capture.file_name = saved_file_path.clone();
-                    capture.session_count = sessions.len() as u32;
-                    capture.size_bytes = std::fs::metadata(&saved_file_path).map(|m| m.len()).unwrap_or(0);
-                }
-            }
-
-            Ok(Json(json!({
-                "project_id": id,
-                "packets_found": packets.len(),
-                "sessions_found": sessions.len(),
-                "saved_to": saved_file_path
-            })))
-        }
-        Err(e) => {
-            Err(api_error(&format!("Ошибка чтения pcap: {}", e), StatusCode::BAD_REQUEST))
+    let now = chrono::Utc::now().to_rfc3339();
+    crate::captures::store_parsed(&state, &id, &file_bytes, &sessions_core, &now);
+    if let Ok(mut captures) = state.captures.write() {
+        if let Some(capture) = captures.get_mut(&id) {
+            capture.file_name = saved_file_path.clone();
+            capture.session_count = sessions_core.len() as u32;
+            capture.size_bytes = file_bytes.len() as u64;
+            capture.imported_at = now;
         }
     }
+    crate::state::persist_capture(&state, &id);
+
+    Ok(Json(json!({
+        "project_id": id,
+        "packets_found": packets.len(),
+        "sessions_found": sessions_core.len(),
+        "saved_to": saved_file_path
+    })))
 }
 
 
@@ -197,7 +211,7 @@ pub(crate) async fn export_project(
     let manifest = json!({
         "project_name": body["project_name"].as_str().unwrap_or("unnamed"),
         "files": body["files"],
-        "expected_at": "2026-10-13T00:00:00Z"
+        "expected_at": chrono::Utc::now().to_rfc3339(),
     });
 
     let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap_or_default();

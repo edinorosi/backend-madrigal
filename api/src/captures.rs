@@ -41,6 +41,20 @@ pub(crate) fn ingest_packets(state: &AppState, file_name: String, file_bytes: Ve
 
     // фотографируем закат будто пару лет назад
     state.captures.write().unwrap().insert(capture_id.clone(), capture.clone());
+    store_parsed(state, &capture_id, &file_bytes, &sessions_core, &now);
+
+    Ok(capture)
+}
+
+/// Раскладка распарсенных сессий в стор: сообщения, общий поток, персист.
+/// Мета Capture — на вызывателе (новая или обновлённая существующая).
+pub(crate) fn store_parsed(
+    state: &AppState,
+    capture_id: &str,
+    file_bytes: &[u8],
+    sessions_core: &[protocol_lab_core::pcap::types::Session],
+    now: &str,
+) {
     let mut stream: Vec<u8> = Vec::new(); //стрим денжерлёхи
     for s_core in sessions_core.iter() { // Штурмуем сессии
         let session_id = Uuid::new_v4().to_string();
@@ -63,7 +77,7 @@ pub(crate) fn ingest_packets(state: &AppState, file_name: String, file_bytes: Ve
                 length: pkt.payload.len() as u64,
                 status: "unknown".to_string(),
                 label: format!("{} б", pkt.payload.len()),
-                timestamp: ts.map(|d| d.to_rfc3339()).unwrap_or(now.clone()),
+                timestamp: ts.map(|d| d.to_rfc3339()).unwrap_or_else(|| now.to_string()),
                 interpretation: "not-parsed".to_string(),
                 verified: false,
                 model_id: None,
@@ -74,24 +88,22 @@ pub(crate) fn ingest_packets(state: &AppState, file_name: String, file_bytes: Ve
 
         let session = Session {
             id: session_id.clone(), 
-            capture_id: capture_id.clone(), 
+            capture_id: capture_id.to_string(), 
             tuple: SessionTuple { // реальный тюпл из ядра
                 source: Endpoint { address: s_core.key.client_ip.to_string(), port: s_core.key.client_port },
                 destination: Endpoint { address: s_core.key.server_ip.to_string(), port: s_core.key.server_port },
             },
             message_count: msgs.len() as u32, // число сообщений
-            started_at: now.clone(),
+            started_at: now.to_string(),
         }; 
         state.sessions.write().unwrap().insert(session_id.clone(), session); 
         let mut all = state.messages.write().unwrap(); // лочим стор (ахаххахаха store типо магазин) сообщений
         for m in msgs { all.insert(m.id.clone(), m); } // кладём сообщения в стор
     } 
 
-    state.raw_bytes.write().unwrap().insert(capture_id.clone(), stream);
-    persist_capture(&state, &capture_id);
-    std::fs::write(format!("{}/source.pcap", capture_dir_in(&state.data_dir, &capture_id)), &file_bytes).ok();
-
-    Ok(capture)
+    state.raw_bytes.write().unwrap().insert(capture_id.to_string(), stream);
+    persist_capture(state, capture_id);
+    std::fs::write(format!("{}/source.pcap", capture_dir_in(&state.data_dir, capture_id)), file_bytes).ok();
 }
 
 pub(crate) async fn import_capture(

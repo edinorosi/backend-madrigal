@@ -6,6 +6,9 @@ pub struct Pattern {
     pub id: String,
     pub name: String,
     pub kind: String,
+    /// Движок детектора: fixed-size | length-prefixed | sync-word.
+    /// Пусто — legacy: движок выводится из `id` (три штатных id работают как раньше).
+    pub detector: Option<String>,
     pub enabled: bool,
     pub params: Value,
     pub output: Value,
@@ -63,19 +66,28 @@ fn parse_hex_word(word: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn validate(value: &Value) -> Option<Pattern> {
-    let id = value.get("id")?.as_str()?;
-    if id.is_empty() {
-        return None;
-    }
-    let kind = value.get("kind")?.as_str()?;
-    if kind.is_empty() {
-        return None;
-    }
-    let params = value.get("params")?;
-    if !params.is_object() {
-        return None;
-    }
+fn validate(file_label: &str, value: &Value) -> Option<Pattern> {
+    let id = match value.get("id")?.as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            eprintln!("[patterns] пропуск {}: нужен непустой id", file_label);
+            return None;
+        }
+    };
+    let kind = match value.get("kind")?.as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            eprintln!("[patterns] пропуск {}: нужен непустой kind", file_label);
+            return None;
+        }
+    };
+    let params = match value.get("params") {
+        Some(p) if p.is_object() => p.clone(),
+        _ => {
+            eprintln!("[patterns] пропуск {}: нужен params-объект", file_label);
+            return None;
+        }
+    };
     Some(Pattern {
         id: id.to_string(),
         name: value
@@ -84,11 +96,15 @@ fn validate(value: &Value) -> Option<Pattern> {
             .unwrap_or(id)
             .to_string(),
         kind: kind.to_string(),
+        detector: value
+            .get("detector")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         enabled: value
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        params: params.clone(),
+        params,
         output: value.get("output").cloned().unwrap_or(Value::Null),
     })
 }
@@ -98,9 +114,13 @@ pub fn load_registry(dir: &Path) -> Vec<Pattern> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("json") {
-                files.push(p);
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
             }
+            if p.file_name().and_then(|s| s.to_str()) == Some("schema.json") {
+                continue; // схема валидации, не паттерн
+            }
+            files.push(p);
         }
     }
     files.sort();
@@ -120,12 +140,9 @@ pub fn load_registry(dir: &Path) -> Vec<Pattern> {
                 continue;
             }
         };
-        match validate(&value) {
+        match validate(&path.display().to_string(), &value) {
             Some(p) => out.push(p),
-            None => eprintln!(
-                "[patterns] пропуск {}: нужны непустые id/kind и params-объект",
-                path.display()
-            ),
+            None => {}
         }
     }
     out
@@ -261,10 +278,22 @@ fn run_sync_word(pattern: &Pattern, bytes: &[u8]) -> Vec<Finding> {
     out
 }
 
+/// Движок паттерна: поле `detector`, иначе legacy-совпадение по `id`.
+/// Пустая строка — неизвестный движок, паттерн пропускается с варнингом.
+fn engine_of(pattern: &Pattern) -> &str {
+    if let Some(d) = pattern.detector.as_deref() {
+        return d;
+    }
+    match pattern.id.as_str() {
+        "fixed-size" | "length-prefixed" | "sync-word" => pattern.id.as_str(),
+        _ => "",
+    }
+}
+
 pub fn run_all(patterns: &[Pattern], bytes: &[u8]) -> Vec<Finding> {
     let mut out = Vec::new();
     for pattern in patterns.iter().filter(|p| p.enabled) {
-        match pattern.id.as_str() {
+        match engine_of(pattern) {
             "fixed-size" => {
                 if let Some(f) = run_fixed(pattern, bytes) {
                     out.push(f);
@@ -276,7 +305,10 @@ pub fn run_all(patterns: &[Pattern], bytes: &[u8]) -> Vec<Finding> {
                 }
             }
             "sync-word" => out.extend(run_sync_word(pattern, bytes)),
-            other => eprintln!("[patterns] неизвестный детектор id={:?}, пропуск", other),
+            other => eprintln!(
+                "[patterns] неизвестный движок {:?} (id={:?}), пропуск",
+                other, pattern.id
+            ),
         }
     }
     out
@@ -291,10 +323,17 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             kind: "framing".to_string(),
+            detector: None,
             enabled: true,
             params,
             output: Value::Null,
         }
+    }
+
+    fn pattern_with_detector(id: &str, detector: &str, params: Value) -> Pattern {
+        let mut p = pattern(id, params);
+        p.detector = Some(detector.to_string());
+        p
     }
 
     #[test]
@@ -351,5 +390,44 @@ mod tests {
         let mut p = pattern("fixed-size", serde_json::json!({"sizes": [8]}));
         p.enabled = false;
         assert!(run_all(&[p], &[0u8; 24]).is_empty());
+    }
+
+    #[test]
+    fn detector_field_routes_custom_id() {
+        // свой id + detector: новый файл без правки кода заводится
+        let p = pattern_with_detector(
+            "my-sizes",
+            "fixed-size",
+            serde_json::json!({"sizes": [8], "min_messages": 3}),
+        );
+        let found = run_all(&[p], &[0u8; 24]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pattern_id, "my-sizes");
+    }
+
+    #[test]
+    fn legacy_id_still_routes_without_detector() {
+        // без detector: три штатных id работают как раньше
+        let p = pattern("sync-word", serde_json::json!({"words": ["AA 55"], "min_count": 1}));
+        assert_eq!(engine_of(&p), "sync-word");
+        let found = run_all(&[p], &[0xAA, 0x55, 0x01]);
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn unknown_detector_skipped() {
+        let p = pattern_with_detector("weird", "nope-engine", serde_json::json!({}));
+        assert!(run_all(&[p], &[0u8; 24]).is_empty());
+    }
+
+    #[test]
+    fn validate_reads_detector() {
+        let v: Value = serde_json::from_str(
+            r#"{"id":"custom","kind":"framing","detector":"fixed-size","params":{"sizes":[4]}}"#,
+        )
+        .unwrap();
+        let p = validate("custom.json", &v).unwrap();
+        assert_eq!(p.detector.as_deref(), Some("fixed-size"));
+        assert!(validate("noid.json", &serde_json::json!({"kind":"framing","params":{}})).is_none());
     }
 }

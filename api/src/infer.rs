@@ -101,6 +101,14 @@ pub(crate) async fn analyze_fields(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    infer_capture(&state, &body).await.map(Json)
+}
+
+/// Вывод модели из журнала без axum-обёрток — переиспользуется MCP-инструментом.
+pub(crate) async fn infer_capture(
+    state: &AppState,
+    body: &Value,
+) -> Result<Value, (StatusCode, Json<crate::dto::ErrorResponse>)> {
     let capture_id = body
         .get("capture_id")
         .or_else(|| body.get("captureId"))
@@ -149,7 +157,7 @@ pub(crate) async fn analyze_fields(
                 .collect();
             let msgs = state.messages.read().unwrap();
             for m in msgs.values().filter(|m| sids.contains(&m.session_id)) {
-                let bytes = crate::models::message_bytes(&state, m);
+                let bytes = crate::models::message_bytes(state, m);
                 if bytes.is_empty() {
                     continue;
                 }
@@ -207,6 +215,7 @@ pub(crate) async fn analyze_fields(
                 length_equals: None,
                 max_message_length: None,
                 message_length: Some(p.length as u32),
+                terms: None,
             },
             fields: p
                 .fields
@@ -240,12 +249,12 @@ pub(crate) async fn analyze_fields(
         created_at: now.clone(),
         updated_at: now,
     };
-    Ok(Json(json!({
+    Ok(json!({
         "model": model,
         "evidence": evidence,
         "framing_used": framing_used,
         "samples": samples.len(),
         "labeled": labeled_count,
         "clusters": proposals.len(),
-    })))
+    }))
 }

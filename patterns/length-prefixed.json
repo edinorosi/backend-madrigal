@@ -2,6 +2,7 @@
   "id": "length-prefixed",
   "name": "Длина в префиксе",
   "kind": "framing",
+  "detector": "length-prefixed",
   "version": 1,
   "enabled": true,
   "params": {
@@ -15,10 +16,3 @@
   },
   "output": { "framing": "length_prefixed", "confidence": "const" }
 }
-
-
-
-
-// /patterns 
-        zov.json
-        kekjek.json

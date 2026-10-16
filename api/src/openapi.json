@@ -3,12 +3,11 @@
   "info": {
     "title": "protocol-lab-api",
     "version": "0.1.0",
-    "description": "Machine-API лаборатории протоколов. Wire-формат — camelCase; legacy snake_case поля тоже принимаются (alias), snake считается deprecated. Ошибки — {\"error\": string} с честным HTTP-статусом. Запуск: --host/--port/--data-dir (второй инстанс для скриптов: --port 8081 --data-dir /tmp/pl-scripts)."
+    "description": "Machine-API лаборатории протоколов. Wire-формат — camelCase; legacy snake_case поля тоже принимаются (alias), snake считается deprecated. Ошибки — {\"error\": string} с честным HTTP-статусом. Замок: если задан API_TOKEN — все /api/* кроме healthz/version/openapi.json требуют Authorization: Bearer <токен>, иначе 401. CORS: loopback всегда разрешён, плюс CORS_ORIGINS/--cors-origins. Запуск: --host/--port/--data-dir/--patterns-dir (второй инстанс для скриптов: --port 8081 --data-dir /tmp/pl-scripts)."
   },
-  "servers": [{ "url": "http://localhost:8080" }],
   "paths": {
     "/api/v1/healthz": {
-      "get": { "summary": "Проб готовности (для ретраев скриптов)", "responses": { "200": { "description": "ok" } } }
+      "get": { "summary": "Проб готовности без токена (для ретраев скриптов и healthcheck)", "responses": { "200": { "description": "ok" } } }
     },
     "/api/v1/version": {
       "get": { "summary": "Версия сервера и протокола", "responses": { "200": { "description": "version" } } }
@@ -95,7 +94,7 @@
     },
     "/api/v1/check": {
       "post": {
-        "summary": "Прогон модели по журналу. Принимает {capture_id, model_id} и {captureId, modelId}",
+        "summary": "Прогон модели по журналу. Принимает {capture_id, model_id} и {captureId, modelId}. last_check пишется только для известных записей",
         "responses": { "200": { "description": "CheckResult" } }
       }
     },
@@ -133,9 +132,9 @@
     },
     "/api/v1/projects/{id}/captures": {
       "post": {
-        "summary": "Загрузка pcap в проект (сессии НЕ создаются; имя файла санитизируется; 400 при ошибке разбора)",
+        "summary": "Загрузка pcap в проект с полным инжестом (сессии/сообщения создаются, старые чистятся; имя файла санитизируется)",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "{project_id, packets_found, sessions_found, saved_to} или {error}" } }
+        "responses": { "200": { "description": "{project_id, packets_found, sessions_found, saved_to}" }, "400": { "description": "bad file" }, "404": { "description": "project not found" } }
       }
     },
     "/api/v1/projects/{id}/observations": {
@@ -184,8 +183,20 @@
     },
     "/api/v1/analyze/autosuggest": {
       "post": {
-        "summary": "Гипотезы разбора. Принимает {file_path} и {filePath}. Смотрит только sessions[0]/c2s; ошибки — честные 400/403/404",
-        "responses": { "200": { "description": "{file, total_bytes_analyzed, hypotheses[]} или {error}" } }
+        "summary": "Гипотезы разбора по всем сессиям (c2s-потоки клеятся). Принимает {file_path} и {filePath}; ошибки — честные 400/403/404",
+        "responses": { "200": { "description": "{file, total_bytes_analyzed, hypotheses[{type, confidence, reason, suggested_framing, pattern_id}]}" } }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "summary": "MCP-сервер (Streamable HTTP): initialize -> notifications/initialized -> tools/list, tools/call. Замок API_TOKEN действует. Инструменты: list_captures/sessions/messages, get_bytes (base64), actions, models (list/save/apply), check, infer_model, codegen, autosuggest, import_capture (base64), run_script. verify_corpus только по REST/SDK",
+        "responses": { "200": { "description": "SSE: data-строки JSON-RPC" }, "401": { "description": "без Bearer при заданном API_TOKEN" } }
+      }
+    },
+    "/api/v1/scripts/run": {
+      "post": {
+        "summary": "Прогон Python-скрипта на сервере (песочница --scripts-sandbox: bwrap без сети / rlimit / off). Body {script, capture_id?, timeout_ms?} (оба кейса); контекст в env LAB_CONTEXT + LAB_API_URL/LAB_API_TOKEN, рядом лежат client.py/lab.py. Ответ {stdout, stderr, exit_code, timed_out}",
+        "responses": { "200": { "description": "{stdout, stderr, exit_code, timed_out}" }, "400": { "description": "bad script" }, "502": { "description": "no python3" } }
       }
     },
     "/api/v1/analyze/fields": {

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -117,7 +118,7 @@ pub struct Action {
     pub expected_message_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelField {
     pub name: String,
@@ -129,7 +130,7 @@ pub struct ModelField {
     pub note: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRuleCondition {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,9 +143,23 @@ pub struct ModelRuleCondition {
     pub max_message_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terms: Option<Vec<CondTerm>>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+/// Кастомное условие: срез `type` по смещению `offset` равен `equals.
+/// Числа — десятичные или 0x; string — как есть; bytes/hex — hex-пары.
+/// Все заданные terms AND-ятся с остальными полями условия.
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CondTerm {
+    pub offset: u32,
+    #[serde(rename = "type")]
+    pub term_type: String,
+    pub equals: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRule {
     pub id: String,
@@ -153,7 +168,7 @@ pub struct ModelRule {
     pub fields: Vec<ModelField>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,

@@ -12,6 +12,10 @@ pub struct AppData {
     pub last_check: RwLock<HashMap<String, CheckResult>>,
     pub raw_bytes: RwLock<HashMap<String, Vec<u8>>>, // хранение пустых писи-файлы 
     pub data_dir: std::path::PathBuf, // корень mutable-стора; остальное (fixtures/patterns/uploads) от cwd
+    pub patterns_dir: std::path::PathBuf, // реестр детекторов: --patterns-dir или PATTERNS_DIR, дефолт patterns
+    pub api_token: Option<String>, // замок: env API_TOKEN; None/пусто — открыто как раньше
+    pub public_url: String, // свой адрес для скриптов: http://host:port (LAB_API_URL)
+    pub sandbox: crate::sandbox::Sandbox, // песочница скриптов: --scripts-sandbox / SCRIPTS_SANDBOX
 }
 
 // ВАЖНО: Здесь должно быть AppData, а не AppState, чтобы не было цикла
@@ -86,11 +90,6 @@ pub(crate) fn persist_global(state: &AppState) { // сохранить набл�
 } 
 
 
-pub(crate) fn load_store() -> AppData { // загрузка всего stora
-    load_store_in(std::path::Path::new("data"))
-}
-
-/// Загрузка стора из кастомного корня (--data-dir).
 pub(crate) fn load_store_in(base: &std::path::Path) -> AppData { // загрузка всего stora
     let mut captures = HashMap::new();
     let mut sessions = HashMap::new();
@@ -112,5 +111,5 @@ pub(crate) fn load_store_in(base: &std::path::Path) -> AppData { // загруз
     if let Ok(b) = std::fs::read(base.join("models.json")) { if let Ok(v) = serde_json::from_slice::<Vec<Model>>(&b) { for m in v { models.insert(m.id.clone(), m); } } } // грузим модели
     let mut last_check = HashMap::new();
     if let Ok(b) = std::fs::read(base.join("checks.json")) { if let Ok(v) = serde_json::from_slice::<HashMap<String, CheckResult>>(&b) { last_check = v; } }
-    AppData { captures: RwLock::new(captures), sessions: RwLock::new(sessions), messages: RwLock::new(messages), observations: RwLock::new(observations), models: RwLock::new(models), raw_bytes: RwLock::new(raw_bytes), last_check: RwLock::new(last_check), data_dir: base.to_path_buf() } // собираем стор
+    AppData { captures: RwLock::new(captures), sessions: RwLock::new(sessions), messages: RwLock::new(messages), observations: RwLock::new(observations), models: RwLock::new(models), raw_bytes: RwLock::new(raw_bytes), last_check: RwLock::new(last_check), data_dir: base.to_path_buf(), patterns_dir: std::path::PathBuf::from("patterns"), api_token: None, public_url: "http://127.0.0.1:8080".to_string(), sandbox: crate::sandbox::Sandbox::Rlimit } // собираем стор
 } 

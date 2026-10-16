@@ -1,16 +1,21 @@
 mod analysis;
+mod auth;
 mod captures;
 mod check;
 mod codegen;
 mod dto;
 mod error;
+mod field_types;
 mod flows;
+mod mcp;
+mod sandbox;
 mod infer;
 mod interpret;
 mod messages;
 mod models;
 mod observations;
 mod projects;
+mod scripts;
 mod state;
 mod status;
 
@@ -37,6 +42,17 @@ struct Args {
     /// Корень mutable-стора (captures/*.json, observations/models/checks).
     #[arg(long, default_value = "data")]
     data_dir: std::path::PathBuf,
+    /// Реестр детекторов анализа. PATTERNS_DIR важнее флага.
+    #[arg(long, default_value = "patterns")]
+    patterns_dir: std::path::PathBuf,
+    /// Дополнительные CORS-источники через запятую (кроме loopback, он разрешён всегда).
+    /// CORS_ORIGINS важнее флага, списки складываются.
+    #[arg(long, default_value = "")]
+    cors_origins: String,
+    /// Песочница скриптов: auto (=bwrap если есть, иначе rlimit), rlimit, bwrap, off.
+    /// SCRIPTS_SANDBOX важнее флага.
+    #[arg(long, default_value = "auto")]
+    scripts_sandbox: String,
 }
 
 #[tokio::main]
@@ -52,13 +68,55 @@ async fn main() {
             }
         }
     }
-    let state = std::sync::Arc::new(load_store_in(&args.data_dir));
+    let mut store = load_store_in(&args.data_dir);
+    store.patterns_dir = std::env::var("PATTERNS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(args.patterns_dir);
+    store.api_token = std::env::var("API_TOKEN").ok().filter(|t| !t.is_empty());
+    if store.api_token.is_some() {
+        println!("🔒 API_TOKEN задан: /api/* кроме проб требуют Bearer");
+    }
+    store.public_url = format!("http://{}:{}", args.host, args.port);
+    let (sandbox, sandbox_warn) = sandbox::resolve(&args.scripts_sandbox);
+    store.sandbox = sandbox;
+    if let Some(w) = sandbox_warn.as_deref() {
+        eprintln!("[sandbox] {}", w);
+    }    let state = std::sync::Arc::new(store);
 
+    let mut extra_origins: Vec<String> = args
+        .cors_origins
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Ok(env_origins) = std::env::var("CORS_ORIGINS") {
+        extra_origins.extend(
+            env_origins
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            move |origin: &axum::http::HeaderValue, _| {
+                let s = origin.to_str().unwrap_or("");
+                let authority = s.split("://").nth(1).and_then(|h| h.split('/').next()).unwrap_or("");
+                let host = if let Some(v6) = authority.strip_prefix('[') {
+                    v6.split(']').next().unwrap_or("")
+                } else {
+                    authority.split(':').next().unwrap_or("")
+                };
+                if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+                    return true;
+                }
+                extra_origins.iter().any(|e| e == s)
+            },
+        ))
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let patterns_dir_label = state.patterns_dir.display().to_string();
     let app = Router::new()
         .route("/api/v1/healthz", get(status::healthz))
         .route("/api/v1/version", get(status::version))
@@ -89,12 +147,30 @@ async fn main() {
         .route("/api/v1/report/generate", post(projects::generate_report))
         .route("/api/v1/analyze/autosuggest", post(analysis::analyze_autosuggest))
         .route("/api/v1/analyze/fields", post(infer::analyze_fields))
+        .route("/api/v1/scripts/run", post(scripts::run_script))
+        .nest_service(
+            "/mcp",
+            rmcp::transport::streamable_http_server::StreamableHttpService::new(
+                {
+                    let state = state.clone();
+                    move || Ok(mcp::LabMcp::new(state.clone()))
+                },
+                std::sync::Arc::new(
+                    rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+                ),
+                Default::default(),
+            ),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_token,
+        ))
         .layer(cors)
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    println!("🚀 Сервер запущен на http://{} (стор: {})", addr, args.data_dir.display());
+    println!("🚀 Сервер запущен на http://{} (стор: {}, паттерны: {})", addr, args.data_dir.display(), patterns_dir_label);
     axum::serve(listener, app).await.unwrap();
 }
 
