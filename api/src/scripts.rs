@@ -8,9 +8,9 @@ use crate::state::AppState;
 
 /// Либа для скриптов обоих миров: вкомпилена в бинарь, кладётся рядом
 /// с запускаемым скриптом — `from client import Client` работает и в диалоге.
-/// Путь от api/src/: api/ -> backend/ -> корень -> scripts/.
-const CLIENT_PY: &str = include_str!("../../../scripts/protocol-lab-py/client.py");
-const LAB_PY: &str = include_str!("../../../scripts/protocol-lab-py/lab.py");
+/// Путь от api/src/: api/ -> api -> корень репозитория -> scripts/.
+const CLIENT_PY: &str = include_str!("../../scripts/protocol-lab-py/client.py");
+const LAB_PY: &str = include_str!("../../scripts/protocol-lab-py/lab.py");
 
 /// Хелпер диагностических скриптов термостенда: вкомпилен в бинарь, кладётся
 /// рядом с запускаемым скриптом — `from _common import *` работает и в диалоге
