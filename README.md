@@ -1,5 +1,13 @@
 # backend-madrigal
 
+![Halal Certified](https://img.shields.io/badge/HALAL-CERTIFIED-008000?style=for-the-badge&labelColor=004D26)
+![Imam Approved](https://img.shields.io/badge/IMAM-APPROVED-228B22?style=for-the-badge&labelColor=1B4332)
+![Sharia Compliant](https://img.shields.io/badge/SHARIA-COMPLIANT-006B3C?style=for-the-badge&labelColor=003D22)
+
+> **Imam-approved source code. 100% halal dependencies. No haram code allowed.**
+>
+> *Unofficial certification. For entertainment purposes only.*
+
 Бэкенд «Лаборатории протоколов»: Rust (cargo-workspace `core` + `api`),
 Axum, HTTP на `:8080`. Парсит PCAP, хранит проекты, применяет модели разбора.
 
