@@ -361,6 +361,18 @@ fn cmd_verify(args: &[&str]) {
     println!("Отчёт сохранён в: {}", output);
 }
 
+fn resolve_patterns_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("PATTERNS_DIR") {
+        return std::path::PathBuf::from(d);
+    }
+    for cand in ["patterns", "backend/patterns"] {
+        if std::path::Path::new(cand).is_dir() {
+            return std::path::PathBuf::from(cand);
+        }
+    }
+    std::path::PathBuf::from("patterns")
+}
+
 fn cmd_analyze(args: &[&str]) {
     if args.is_empty() {
         println!("Использование: analyze <pcap>");
@@ -369,34 +381,55 @@ fn cmd_analyze(args: &[&str]) {
 
     let pcap_path = args[0];
     println!("Авто-анализ файла: {}", pcap_path);
-    
+
     let packets = match read_pcap(Path::new(pcap_path)) {
         Ok(p) => p,
         Err(e) => { println!("Ошибка чтения PCAP: {}", e); return; }
     };
-    
+
     let sessions = group_into_sessions(&packets);
     println!("Найдено сессий: {}", sessions.len());
 
-    for (idx, session) in sessions.iter().enumerate() {
+    // та же склейка c2s-потоков, что в POST /analyze/autosuggest
+    let mut clean_bytes: Vec<u8> = Vec::new();
+    let mut sessions_used = 0usize;
+    for session in &sessions {
         let (flow_c2s, _) = split_into_flows(session);
         let chunks = TcpReassembler::reassemble(&flow_c2s.packets);
-        
-        let mut total_bytes = 0;
-        let mut gaps = 0;
-        
+        let mut session_bytes = 0usize;
         for chunk in &chunks {
-            match chunk {
-                StreamChunk::Data { length, .. } => total_bytes += length,
-                StreamChunk::Gap { .. } => gaps += 1,
-                _ => {}
+            if let StreamChunk::Data { packet_index, .. } = chunk {
+                if let Some(pkt) = session.packets.iter().find(|p| p.index == *packet_index) {
+                    clean_bytes.extend_from_slice(&pkt.payload);
+                    session_bytes += pkt.payload.len();
+                }
             }
         }
-        
-        println!("  Сессия {}: {} байт, {} дыр", idx, total_bytes, gaps);
+        if session_bytes > 0 {
+            sessions_used += 1;
+        }
     }
-    
-    println!("\nАнализ завершён. (Полная эвристика паттернов будет добавлена позже)");
+    println!("Сессий с данными (c2s): {}, байт: {}", sessions_used, clean_bytes.len());
+
+    if clean_bytes.len() < 10 {
+        println!("Недостаточно данных для анализа");
+        return;
+    }
+
+    let dir = resolve_patterns_dir();
+    let registry = protocol_lab_core::patterns::load_registry(&dir);
+    println!("Паттернов загружено: {} ({})", registry.len(), dir.display());
+
+    let mut found = protocol_lab_core::patterns::run_all(&registry, &clean_bytes);
+    found.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    if found.is_empty() {
+        println!("Гипотез нет");
+        return;
+    }
+    for f in &found {
+        println!("- [{}] {} (conf {:.2}): {} | framing={}",
+            f.pattern_id, f.ftype, f.confidence, f.reason, f.framing);
+    }
 }
 
 fn cmd_export(args: &[&str]) {

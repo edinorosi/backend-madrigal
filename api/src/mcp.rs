@@ -284,7 +284,7 @@ impl LabMcp {
         Ok(CallToolResult::structured(out))
     }
 
-    #[tool(description = "Гипотезы разбора для pcap-файла (только первая сессия/c2s)")]
+    #[tool(description = "Гипотезы разбора для pcap-файла (все сессии, c2s-потоки склеены)")]
     async fn analyze_autosuggest(
         &self,
         Parameters(p): Parameters<FileQuery>,

@@ -1,0 +1,15 @@
+{
+  "id": "thermo-magic",
+  "name": "Магия термостенда A6 5C",
+  "kind": "framing",
+  "detector": "sync-word",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "words": ["A6 5C"],
+    "min_count": 2,
+    "confidence": 0.95,
+    "note": "Каждое сообщение термостенда (research/*, additional/*) начинается с A6 5C. Срабатывает на любой нашей записи."
+  },
+  "output": { "framing": "sync_word", "confidence": "const" }
+}

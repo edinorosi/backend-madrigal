@@ -1,0 +1,18 @@
+{
+  "id": "thermo-len-u8",
+  "name": "Длина u8 для термостенда",
+  "kind": "framing",
+  "detector": "length-prefixed",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "prefix_bytes": [1],
+    "prefix_encoding": "u8_then_u16be",
+    "max_len": 64,
+    "min_messages": 2,
+    "min_rate": 0.5,
+    "confidence": 0.55,
+    "note": "Мягкий вариант под короткие порции измерений. На потоках с магией A6 5C не стреляет (первый байт A6 слишком велик), только fallback."
+  },
+  "output": { "framing": "length_prefixed", "confidence": "const" }
+}

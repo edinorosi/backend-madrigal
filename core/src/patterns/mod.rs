@@ -369,6 +369,41 @@ mod tests {
     }
 
     #[test]
+    fn thermo_magic_fires_on_thermostat_stream() {
+        // поток в духе sample_protocol: каждое сообщение начинается с A6 5C
+        let stream = vec![
+            0xA6, 0x5C, 0x00, 0x00, 0x00, //
+            0xA6, 0x5C, 0x00, 0x01, 0x00, 0x10, //
+            0xA6, 0x5C, 0x00, 0x09, 0x00, 0x02, 0x00, 0x20, 0x01,
+        ];
+        let p = pattern_with_detector(
+            "thermo-magic",
+            "sync-word",
+            serde_json::json!({"words": ["A6 5C"], "min_count": 2, "confidence": 0.95}),
+        );
+        let found = run_all(&[p], &stream);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].pattern_id, "thermo-magic");
+        assert_eq!(found[0].framing["sync"], "A6 5C");
+    }
+
+    #[test]
+    fn stock_sync_words_miss_thermostat_stream() {
+        // стоковые маркеры AA 55 / FF 00 / 7E 7E в нашем трафике не встречаются
+        let stream = vec![
+            0xA6, 0x5C, 0x00, 0x00, 0x00, //
+            0xA6, 0x5C, 0x00, 0x01, 0x00, 0x10, //
+            0xA6, 0x5C, 0x00, 0x09, 0x00, 0x02, 0x00, 0x20, 0x01,
+        ];
+        let p = pattern_with_detector(
+            "sync-word",
+            "sync-word",
+            serde_json::json!({"words": ["AA 55", "55 AA", "FF 00", "00 FF", "7E 7E"], "min_count": 2, "confidence": 0.75}),
+        );
+        assert!(run_all(&[p], &stream).is_empty());
+    }
+
+    #[test]
     fn invalid_registry_entries_skipped() {
         use std::io::Write;
         let dir = std::env::temp_dir().join("protocol_lab_patterns_test");

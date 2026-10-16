@@ -1,0 +1,18 @@
+{
+  "id": "thermo-len-u16",
+  "name": "Длина u16be для термостенда",
+  "kind": "framing",
+  "detector": "length-prefixed",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "prefix_bytes": [2],
+    "prefix_encoding": "u8_then_u16be",
+    "max_len": 256,
+    "min_messages": 2,
+    "min_rate": 0.5,
+    "confidence": 0.5,
+    "note": "Мягкий вариант под длинные ответы (порции из 8-16 измерений). На потоках с магией не стреляет, только fallback."
+  },
+  "output": { "framing": "length_prefixed", "confidence": "const" }
+}

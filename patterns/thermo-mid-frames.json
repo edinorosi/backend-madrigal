@@ -1,0 +1,15 @@
+{
+  "id": "thermo-mid-frames",
+  "name": "Средние кадры термостенда",
+  "kind": "framing",
+  "detector": "fixed-size",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "sizes": [9, 12, 18],
+    "min_messages": 3,
+    "confidence": 0.65,
+    "note": "Типичные длины ответов термостенда: 9/12/18 байт (конфигурации, короткие порции измерений). Слабый fallback."
+  },
+  "output": { "framing": "fixed", "confidence": "const" }
+}

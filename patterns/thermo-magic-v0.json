@@ -1,0 +1,15 @@
+{
+  "id": "thermo-magic-v0",
+  "name": "Магия термостенда строгая A6 5C 00",
+  "kind": "framing",
+  "detector": "sync-word",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "words": ["A6 5C 00"],
+    "min_count": 2,
+    "confidence": 0.9,
+    "note": "Трехбайтовый вариант: магия + нулевой байт версии. Все сообщения наших записей начинаются с A6 5C 00."
+  },
+  "output": { "framing": "sync_word", "confidence": "const" }
+}

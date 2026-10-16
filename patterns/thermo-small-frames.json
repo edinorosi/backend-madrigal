@@ -1,0 +1,15 @@
+{
+  "id": "thermo-small-frames",
+  "name": "Малые кадры термостенда",
+  "kind": "framing",
+  "detector": "fixed-size",
+  "version": 1,
+  "enabled": true,
+  "params": {
+    "sizes": [5, 6],
+    "min_messages": 4,
+    "confidence": 0.7,
+    "note": "Минимальный запрос read-config — 5 байт (A6 5C 00 00 00), короткие команды — 6 байт. Слабый эвристический fallback, ниже sync-word по уверенности."
+  },
+  "output": { "framing": "fixed", "confidence": "const" }
+}
