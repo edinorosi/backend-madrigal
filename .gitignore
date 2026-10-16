@@ -2,3 +2,5 @@
 *.tar.gz
 data/
 uploads/
+__pycache__/
+*.pyc
