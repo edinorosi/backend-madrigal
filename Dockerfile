@@ -21,6 +21,8 @@ RUN mkdir -p core/src api/src/bin \
 # пересобрал пакеты, а не принял заглушки за актуальные.
 COPY core/ core/
 COPY api/ api/
+COPY scripts/ scripts/
+COPY fixtures/ fixtures/
 RUN touch core/src/lib.rs api/src/main.rs api/src/bin/cli.rs \
     && cargo build --release -p protocol-lab-api --bin protocol-lab-api
 
