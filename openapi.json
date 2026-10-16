@@ -1,0 +1,613 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Protocol Lab API — фронтенд-контракт",
+    "version": "1.0.0",
+    "description": "HTTP-контракт, который обязан удовлетворять бэкенд для работы фронтенда edinoros. Источник правды — фронтенд: 14 методов AppService (src/services/appService.ts) и типы src/types/domain.ts. Все роуты возвращают camelCase-JSON, ошибки — {\"error\": string} со статусом 4xx/5xx (не 200)."
+  },
+  "tags": [
+    { "name": "captures", "description": "Захваты трафика (файлы pcap/pcapng), импорт и сессии" },
+    { "name": "messages", "description": "Сообщения сессий: поля, байты, наблюдения, разбор" },
+    { "name": "observations", "description": "Наблюдения оператора к сообщениям (upsert по id)" },
+    { "name": "actions", "description": "Журнал действий оператора для проверки (R4)" },
+    { "name": "check", "description": "Прогон модели по журналу действий" },
+    { "name": "models", "description": "Модели разбора (R3), upsert по id" }
+  ],
+  "paths": {
+    "/api/v1/captures": {
+      "get": {
+        "operationId": "listCaptures",
+        "tags": ["captures"],
+        "summary": "Список захватов",
+        "description": "Возвращает все захваты в системе. Порядок — от новых к старым не гарантируется; фронт сортирует по importedAt.",
+        "responses": {
+          "200": {
+            "description": "Массив захватов",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Capture" } }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "post": {
+        "operationId": "importCapture",
+        "tags": ["captures"],
+        "summary": "Импорт захвата (multipart)",
+        "description": "Загрузка pcap/pcapng-файла. Парсит файл, создаёт Capture, группирует в Session. Файл обязателен, field name = file. Ответ — созданный Capture с посчитанными sessionCount и sizeBytes.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary", "description": "Файл pcap или pcapng" }
+                },
+                "required": ["file"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Импортированный захват",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Capture" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/captures/{captureId}/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "tags": ["captures"],
+        "summary": "Сессии захвата",
+        "parameters": [
+          { "name": "captureId", "in": "path", "required": true, "schema": { "type": "string" }, "description": "ID захвата" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив сессий",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Session" } }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/captures/{captureId}/bytes": {
+      "get": {
+        "operationId": "getBytes",
+        "tags": ["captures"],
+        "summary": "Байты потока записи",
+        "description": "Сырые байты захвата. offset — смещение в байтовом потоке записи, то же, что Message.byteOffset; байты сообщения читаются как getBytes(captureId, message.byteOffset, message.length). offset и length обязательны. Ответ — application/octet-stream.",
+        "parameters": [
+          { "name": "captureId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "offset", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 }, "description": "Смещение от начала байтового потока записи" },
+          { "name": "length", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1 }, "description": "Длина диапазона в байтах" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сырые байты",
+            "content": {
+              "application/octet-stream": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/captures/{captureId}/actions": {
+      "get": {
+        "operationId": "listActions",
+        "tags": ["actions"],
+        "summary": "Журнал действий захвата",
+        "description": "Журнал действий оператора для записи (R4). Исходные данные исследования; без него раздел «Проверка» не работает. Ожидаемая реализация на бэке — TODO; пока моки.",
+        "parameters": [
+          { "name": "captureId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив действий",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Action" } }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/messages": {
+      "get": {
+        "operationId": "listMessages",
+        "tags": ["messages"],
+        "summary": "Сообщения сессии",
+        "description": "Без параметра direction — сообщения обеих сторон одним потоком, упорядоченным по времени (едининый список сообщений, §5). С direction — фильтр по стороне. Каждое Message.fields — разобранные поля; пустой массив, если модель не применялась.",
+        "parameters": [
+          { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "direction", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/Direction" }, "description": "Фильтр: request | response" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив сообщений в порядке времени",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Message" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/messages/{messageId}/observations": {
+      "get": {
+        "operationId": "listObservations",
+        "tags": ["observations"],
+        "summary": "Наблюдения сообщения",
+        "parameters": [
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Массив наблюдений",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Observation" } }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/messages/{messageId}/apply-model": {
+      "post": {
+        "operationId": "applyModel",
+        "tags": ["messages"],
+        "summary": "Применить модель к сообщению",
+        "description": "Байты сообщения разбираются по правилам модели, возвращаются поля с привязкой к байтам (byteOffset, length). Ответ — массив MessageField.",
+        "parameters": [
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "modelId": { "type": "string", "description": "ID модели разбора" }
+                },
+                "required": ["modelId"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Разобранные поля",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MessageField" } }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/observations": {
+      "put": {
+        "operationId": "saveObservation",
+        "tags": ["observations"],
+        "summary": "Сохранить наблюдение (upsert по id)",
+        "description": "Upsert по Observation.id: если id уже есть — перезаписать, иначе создать. Ответ 204 без тела.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Observation" }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Сохранено, тело пустое" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/observations/{id}": {
+      "delete": {
+        "operationId": "removeObservation",
+        "tags": ["observations"],
+        "summary": "Удалить наблюдение",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Удалено, тело пустое" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/check": {
+      "post": {
+        "operationId": "checkModel",
+        "tags": ["check"],
+        "summary": "Прогон модели по журналу действий",
+        "description": "Из разобранных сообщений извлекает значения по правилам модели и сопоставляет с журналом действий (Action). modelId опционален — если не передан, используется модель по умолчанию (в моках одна). Ответ — CheckResult: строки + сводка. Статусы строк: ok — значение совпало, partial — частично, unknown — нет данных, error — ошибка разбора.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "captureId": { "type": "string" },
+                  "modelId": { "type": "string", "description": "Опционально; если нет — модель по умолчанию" }
+                },
+                "required": ["captureId"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Результат проверки",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CheckResult" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "operationId": "listModels",
+        "tags": ["models"],
+        "summary": "Список моделей разбора",
+        "responses": {
+          "200": {
+            "description": "Массив моделей",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      },
+      "put": {
+        "operationId": "saveModel",
+        "tags": ["models"],
+        "summary": "Сохранить модель (upsert по id)",
+        "description": "Upsert по Model.id: если id уже есть — перезаписать, иначе создать. Ответ 204 без тела.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Model" }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Сохранено, тело пустое" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/models/{modelId}": {
+      "delete": {
+        "operationId": "removeModel",
+        "tags": ["models"],
+        "summary": "Удалить модель",
+        "parameters": [
+          { "name": "modelId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Удалено, тело пустое" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "BadRequest": {
+        "description": "Невалидные параметры или тело",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Сущность не найдена",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Внутренняя ошибка сервера",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": { "type": "string", "description": "Человекочитаемое описание ошибки" }
+        },
+        "required": ["error"]
+      },
+      "Direction": {
+        "type": "string",
+        "enum": ["request", "response"]
+      },
+      "MessageRole": {
+        "type": "string",
+        "enum": ["REQ", "RSP", "NOTIFY"]
+      },
+      "ParseStatus": {
+        "type": "string",
+        "enum": ["parsed", "unknown", "error"]
+      },
+      "InterpretationStatus": {
+        "type": "string",
+        "enum": ["parsed", "partial", "not-parsed"]
+      },
+      "ObservationKind": {
+        "type": "string",
+        "enum": ["comment", "range", "hypothesis", "field"]
+      },
+      "ObservationStatus": {
+        "type": "string",
+        "enum": ["draft", "confirmed", "refuted", "stale"]
+      },
+      "CheckStatus": {
+        "type": "string",
+        "enum": ["ok", "partial", "unknown", "error"]
+      },
+      "ModelStatus": {
+        "type": "string",
+        "enum": ["draft", "checked", "stale"]
+      },
+      "ByteRange": {
+        "type": "object",
+        "properties": {
+          "offset": { "type": "integer", "minimum": 0 },
+          "length": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["offset", "length"]
+      },
+      "Endpoint": {
+        "type": "object",
+        "properties": {
+          "address": { "type": "string", "description": "IP или домен" },
+          "port": { "type": "integer" }
+        },
+        "required": ["address", "port"]
+      },
+      "SessionTuple": {
+        "type": "object",
+        "properties": {
+          "source": { "$ref": "#/components/schemas/Endpoint" },
+          "destination": { "$ref": "#/components/schemas/Endpoint" }
+        },
+        "required": ["source", "destination"]
+      },
+      "Capture": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "fileName": { "type": "string" },
+          "importedAt": { "type": "string", "format": "date-time" },
+          "sizeBytes": { "type": "integer", "minimum": 0 },
+          "sessionCount": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["id", "fileName", "importedAt", "sizeBytes", "sessionCount"]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "captureId": { "type": "string" },
+          "tuple": { "$ref": "#/components/schemas/SessionTuple" },
+          "messageCount": { "type": "integer", "minimum": 0 },
+          "startedAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "captureId", "tuple", "messageCount", "startedAt"]
+      },
+      "MessageField": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "value": { "type": "string" },
+          "range": { "$ref": "#/components/schemas/ByteRange" },
+          "note": { "type": "string" },
+          "ruleId": { "type": "string" }
+        },
+        "required": ["id", "name", "type", "value", "range"]
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "packetNumber": { "type": "integer" },
+          "byteOffset": { "type": "integer", "minimum": 0 },
+          "direction": { "$ref": "#/components/schemas/Direction" },
+          "role": { "$ref": "#/components/schemas/MessageRole" },
+          "length": { "type": "integer", "minimum": 0 },
+          "status": { "$ref": "#/components/schemas/ParseStatus" },
+          "label": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "interpretation": { "$ref": "#/components/schemas/InterpretationStatus" },
+          "verified": { "type": "boolean" },
+          "modelId": { "type": "string" },
+          "fields": { "type": "array", "items": { "$ref": "#/components/schemas/MessageField" } }
+        },
+        "required": ["id", "sessionId", "packetNumber", "byteOffset", "direction", "role", "length", "status", "label", "timestamp", "interpretation", "verified", "fields"]
+      },
+      "Observation": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "messageId": { "type": "string" },
+          "kind": { "$ref": "#/components/schemas/ObservationKind" },
+          "text": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "range": { "$ref": "#/components/schemas/ByteRange" },
+          "status": { "$ref": "#/components/schemas/ObservationStatus" },
+          "hypothesis": { "type": "string", "enum": ["confirmed", "refuted", "unchecked"] },
+          "ruleId": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "messageId", "kind", "createdAt"]
+      },
+      "Action": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "value": { "type": ["number", "null"], "description": "Ожидаемое числовое значение действия; null — нет значения" },
+          "expectedMessageId": { "type": ["string", "null"], "description": "ID сообщения, в котором ожидали увидеть значение; null — нет привязки" }
+        },
+        "required": ["id", "timestamp", "name", "description", "value", "expectedMessageId"]
+      },
+      "CheckRow": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "actionId": { "type": "string" },
+          "time": { "type": "string", "format": "date-time" },
+          "action": { "type": "string" },
+          "expected": { "type": ["number", "null"] },
+          "extracted": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/CheckStatus" },
+          "messageId": { "type": ["string", "null"] }
+        },
+        "required": ["id", "actionId", "time", "action", "expected", "extracted", "status", "messageId"]
+      },
+      "CheckResult": {
+        "type": "object",
+        "properties": {
+          "rows": { "type": "array", "items": { "$ref": "#/components/schemas/CheckRow" } },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": { "type": "integer" },
+              "ok": { "type": "integer" },
+              "partial": { "type": "integer" },
+              "unknown": { "type": "integer" },
+              "error": { "type": "integer" }
+            },
+            "required": ["total", "ok", "partial", "unknown", "error"]
+          },
+          "modelId": { "type": ["string", "null"] },
+          "modelName": { "type": ["string", "null"] }
+        },
+        "required": ["rows", "summary", "modelId", "modelName"]
+      },
+      "ModelRuleCondition": {
+        "type": "object",
+        "properties": {
+          "opcode": { "type": "integer" },
+          "opcodes": { "type": "array", "items": { "type": "integer" } },
+          "lengthEquals": { "type": "integer" },
+          "maxMessageLength": { "type": "integer" }
+        }
+      },
+      "ModelField": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "offset": {
+            "oneOf": [
+              { "type": "integer", "minimum": 0 },
+              { "type": "string", "const": "end-2" }
+            ],
+            "description": "Число — смещение от начала сообщения; \"end-2\" — от конца минус 2"
+          },
+          "length": {
+            "oneOf": [
+              { "type": "integer", "minimum": 1 },
+              { "type": "string", "enum": ["rest", "rest-2"] }
+            ],
+            "description": "Число — длина в байтах; \"rest\" — до конца; \"rest-2\" — до конца минус 2"
+          },
+          "note": { "type": "string" }
+        },
+        "required": ["name", "type", "offset", "length"]
+      },
+      "ModelRule": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "condition": { "$ref": "#/components/schemas/ModelRuleCondition" },
+          "fields": { "type": "array", "items": { "$ref": "#/components/schemas/ModelField" } }
+        },
+        "required": ["id", "name", "condition", "fields"]
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/ModelStatus" },
+          "rules": { "type": "array", "items": { "$ref": "#/components/schemas/ModelRule" } },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "name", "status", "rules", "createdAt"]
+      }
+    }
+  }
+}

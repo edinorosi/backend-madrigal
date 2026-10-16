@@ -1,0 +1,12 @@
+# Не тащим в контекст сборки локальные артефакты и данные
+target/
+data/
+uploads/
+.git/
+.gitignore
+*.tar.gz
+*.exe
+*.md
+openapi.json
+Dockerfile
+.dockerignore
