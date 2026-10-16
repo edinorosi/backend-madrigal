@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "metadata": {
+    "exportedAt": "2026-10-16T02:40:57.511Z",
+    "author": null
+  },
+  "model": {
+    "id": "model-25f01e41-0109-4c7f-a335-cfe1aaa2866d",
+    "name": "Авто: 03_missing_segment",
+    "status": "draft",
+    "rules": [
+      {
+        "id": "rule-ad55c6d2-a0c2-4763-a201-4f19d62a2b73",
+        "name": "Распознанные опкоды",
+        "condition": {
+          "opcodes": [
+            0,
+            1,
+            8,
+            166
+          ]
+        },
+        "fields": [
+          {
+            "name": "count",
+            "type": "uint8",
+            "offset": 16,
+            "length": 1,
+            "note": "Опкод из списка: 0x00, 0x01, 0x08, 0xA6"
+          },
+          {
+            "name": "opcode",
+            "type": "uint8",
+            "offset": 0,
+            "length": 1
+          },
+          {
+            "name": "payload",
+            "type": "bytes",
+            "offset": 2,
+            "length": 1
+          }
+        ]
+      },
+      {
+        "id": "rule-a9ee0f3e-b776-4be7-9c1f-e654cc82e303",
+        "name": "Неизвестный кадр",
+        "condition": {},
+        "fields": [
+          {
+            "name": "raw",
+            "type": "bytes",
+            "offset": 0,
+            "length": "rest",
+            "note": "Кадр без распознанной структуры"
+          }
+        ]
+      }
+    ],
+    "createdAt": "2026-10-16T02:24:26.407Z"
+  },
+  "source": {
+    "captureName": "03_missing_segment.pcap",
+    "captureSizeBytes": 4062,
+    "captureImportedAt": "2026-10-16T02:24:26.353523750+00:00"
+  }
+}

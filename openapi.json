@@ -36,7 +36,7 @@
         "operationId": "importCapture",
         "tags": ["captures"],
         "summary": "Импорт захвата (multipart)",
-        "description": "Загрузка pcap/pcapng-файла. Парсит файл, создаёт Capture, группирует в Session. Файл обязателен, field name = file. Ответ — созданный Capture с посчитанными sessionCount и sizeBytes.",
+        "description": "Загрузка pcap/pcapng-файла. Парсит файл, создаёт Capture, группирует в Session. Файл обязателен, field name = file. Лимит 200 МиБ (413). Ответ — созданный Capture с посчитанными sessionCount и sizeBytes.",
         "requestBody": {
           "required": true,
           "content": {
@@ -61,6 +61,7 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
+          "413": { "description": "Файл больше 200 МиБ (MAX_CAPTURE_BYTES)" },
           "500": { "$ref": "#/components/responses/InternalError" }
         }
       }
@@ -118,7 +119,7 @@
         "operationId": "listActions",
         "tags": ["actions"],
         "summary": "Журнал действий захвата",
-        "description": "Журнал действий оператора для записи (R4). Исходные данные исследования; без него раздел «Проверка» не работает. Ожидаемая реализация на бэке — TODO; пока моки.",
+        "description": "Журнал действий оператора для записи (R4). Источник: загруженный per-capture журнал, затем глобальный, затем fixtures. Исходные данные исследования; без него раздел «Проверка» не работает.",
         "parameters": [
           { "name": "captureId", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
@@ -132,6 +133,79 @@
             }
           },
           "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/captures/{captureId}/journal": {
+      "post": {
+        "operationId": "importJournal",
+        "tags": ["actions"],
+        "summary": "Загрузка журнала действий CSV",
+        "description": "Импорт CSV-журнала через фронт (multipart file + текстовое поле scope=capture|global, дефолт capture). Обязательные колонки: capture,session,action_id,start_utc,end_utc,action,parameters,observed_result. Лимит 5 МиБ. Ответ — JournalUploadResult {actions, skipped, scope, source}.",
+        "parameters": [
+          { "name": "captureId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "scope": { "type": "string", "enum": ["capture", "global"] }
+                },
+                "required": ["file"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Журнал принят",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/JournalUploadResult" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/journal": {
+      "post": {
+        "operationId": "importGlobalJournal",
+        "tags": ["actions"],
+        "summary": "Загрузка глобального журнала действий CSV",
+        "description": "То же, что importJournal со scope=global, но без привязки к записи в пути.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                },
+                "required": ["file"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Журнал принят",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/JournalUploadResult" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
           "500": { "$ref": "#/components/responses/InternalError" }
         }
       }
@@ -520,6 +594,16 @@
           "expectedMessageId": { "type": ["string", "null"], "description": "ID сообщения, в котором ожидали увидеть значение; null — нет привязки" }
         },
         "required": ["id", "timestamp", "name", "description", "value", "expectedMessageId"]
+      },
+      "JournalUploadResult": {
+        "type": "object",
+        "properties": {
+          "actions": { "type": "integer", "description": "Число принятых строк журнала" },
+          "skipped": { "type": "integer", "description": "Число пропущенных битых строк" },
+          "scope": { "type": "string", "enum": ["capture", "global"] },
+          "source": { "type": "string", "description": "Имя загруженного файла" }
+        },
+        "required": ["actions", "skipped", "scope", "source"]
       },
       "CheckRow": {
         "type": "object",

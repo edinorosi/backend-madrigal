@@ -2,7 +2,7 @@ use std::path::Path as StdPath;
 
 use axum::{
     body::Body,
-    extract::{Multipart, Path as AxumPath, State},
+    extract::{Multipart, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -11,45 +11,9 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 use tar::Builder;
-use uuid::Uuid;
 
-use crate::dto::Capture;
 use crate::error::api_error;
 use crate::state::AppState;
-
-pub(crate) async fn create_project(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-    let id = Uuid::new_v4().to_string();
-    let name = body["name"].as_str().unwrap_or("Untitled Project").to_string();
-
-    let new_capture = Capture {
-       id: id.clone(),
-       file_name: name,
-       imported_at: chrono::Utc::now().to_rfc3339(),
-       size_bytes: 0,
-       session_count: 0,
-   };
-
-   state.captures.write().unwrap().insert(id.clone(), new_capture);
-
-    Json(json!({ "id": id, "status": "created"}))
-}
-
-//Священный эндпоинт
-pub(crate) async fn get_projects(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let captures = state.captures.read().unwrap(); 
-    let list: Vec<serde_json::Value> = captures.values().map(|c| {
-        json!({"id": c.id, "name": c.file_name})
-    }).collect(); 
-    Json(json!({"projects": list})) 
-}
-
-pub(crate) async fn get_project(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
-    let captures = state.captures.read().unwrap(); // <-- Добавили присваивание
-    match captures.get(&id) { 
-        Some(c) => Ok(Json(json!(c))),
-        None => Err(api_error("Capture not found", StatusCode::NOT_FOUND))
-    }
-}
 
 pub(crate) async fn generate_report( //мясо, наверное даже фарш. Генератор отчётов
     State(state): State<AppState>,
@@ -78,69 +42,6 @@ pub(crate) async fn generate_report( //мясо, наверное даже фа�
         .body(Body::from(md))
         .unwrap()
 }
-
-pub(crate) async fn upload_capture(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    mut form: Multipart 
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<crate::dto::ErrorResponse>)> {
-    if !state.captures.read().unwrap().contains_key(&id) {
-        return Err(api_error("Project not found", StatusCode::NOT_FOUND));
-    }
-    let _ = std::fs::create_dir_all("uploads");
-    
-    let mut saved_file_path = String::from("uploads/unknown.pcap");
-    let mut file_bytes: Vec<u8> = Vec::new();
-
-    // Проходим по полям по полям синий трактор едет к нам
-    while let Ok(Some(field)) = form.next_field().await {
-        let raw_name = field.file_name().unwrap_or("upload.pcap").to_string(); //деаноним имя файла
-        let file_name = StdPath::new(&raw_name).file_name().and_then(|n| n.to_str()).unwrap_or("upload.pcap"); // только имя, без ../../
-        
-        let data = field.bytes().await.unwrap_or_default().to_vec(); // записываем байты в дату переменную йо
-
-        saved_file_path = format!("uploads/{}", file_name); //генерируем путь истинный
-
-        let _ = std::fs::write(&saved_file_path, &data); // сохран
-        file_bytes = data;
-    }
-    if file_bytes.is_empty() {
-        return Err(api_error("File is empty or missing", StatusCode::BAD_REQUEST));
-    }
-
-    let packets = match protocol_lab_core::pcap::reader::read_pcap(StdPath::new(&saved_file_path)) { //читаем файл пакетов с продуктами
-        Ok(p) => p,
-        Err(e) => return Err(api_error(&format!("Ошибка чтения pcap: {}", e), StatusCode::BAD_REQUEST)),
-    };
-    let sessions_core = protocol_lab_core::pcap::session::group_into_sessions(&packets); //отденьно отсордировываем по группам пакеты чтобы не было мешанины
-
-    // чистим старые данные проекта (как remove_capture, но саму запись оставляем)
-    let sids: Vec<String> = state.sessions.read().unwrap().values().filter(|s| s.capture_id == id).map(|s| s.id.clone()).collect();
-    state.messages.write().unwrap().retain(|_, m| !sids.contains(&m.session_id));
-    state.sessions.write().unwrap().retain(|_, s| s.capture_id != id);
-    state.raw_bytes.write().unwrap().remove(&id);
-    state.last_check.write().unwrap().remove(&id);
-
-    let now = chrono::Utc::now().to_rfc3339();
-    crate::captures::store_parsed(&state, &id, &file_bytes, &sessions_core, &now);
-    if let Ok(mut captures) = state.captures.write() {
-        if let Some(capture) = captures.get_mut(&id) {
-            capture.file_name = saved_file_path.clone();
-            capture.session_count = sessions_core.len() as u32;
-            capture.size_bytes = file_bytes.len() as u64;
-            capture.imported_at = now;
-        }
-    }
-    crate::state::persist_capture(&state, &id);
-
-    Ok(Json(json!({
-        "project_id": id,
-        "packets_found": packets.len(),
-        "sessions_found": sessions_core.len(),
-        "saved_to": saved_file_path
-    })))
-}
-
 
 pub(crate) fn collect_pcaps(dir: &StdPath, out: &mut Vec<std::path::PathBuf>) {
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -173,22 +74,55 @@ pub(crate) async fn import_project(
         .map_err(|e| api_error(&format!("Bad archive: {}", e), StatusCode::BAD_REQUEST))?;
     let mut pcaps = Vec::new();
     collect_pcaps(tmp.path(), &mut pcaps);
+    // Журналы из архива: глобальный + per-capture по имени pcap.
+    let mut journals: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    let journals_dir = tmp.path().join("journals");
+    if let Ok(rd) = std::fs::read_dir(&journals_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() {
+                if let (Some(name), Ok(bytes)) = (p.file_name().and_then(|n| n.to_str()), std::fs::read(&p)) {
+                    if let Some(base) = name.strip_suffix(".journal.csv") {
+                        journals.insert(base.to_string(), bytes);
+                    }
+                }
+            }
+        }
+    }
     let mut imported = Vec::new();
     let mut skipped = 0u32;
+    let mut journals_restored = 0u32;
     for p in pcaps {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("upload.pcap").to_string();
         match std::fs::read(&p) {
-            Ok(bytes) => match crate::captures::ingest_packets(&state, name, bytes) {
-                Ok(c) => imported.push(c.id),
+            Ok(bytes) => match crate::captures::ingest_packets(&state, name.clone(), bytes) {
+                Ok(c) => {
+                    if let Some(jb) = journals.get(&name) {
+                        let dest = crate::check::per_capture_journal_path(&state.data_dir, &c.id);
+                        if std::fs::write(&dest, jb).is_ok() {
+                            journals_restored += 1;
+                        }
+                    }
+                    imported.push(c.id);
+                }
                 Err(_) => skipped += 1,
             },
             Err(_) => skipped += 1,
         }
     }
-    Ok(Json(json!({ "imported": imported, "skipped": skipped })))
+    // Глобальный журнал — в стор (валидируем шапку перед записью).
+    let global_src = tmp.path().join("journal_global.csv");
+    if let Ok(bytes) = std::fs::read(&global_src) {
+        let dest = crate::check::global_journal_path(&state.data_dir);
+        if std::fs::write(&dest, &bytes).is_ok() {
+            journals_restored += 1;
+        }
+    }
+    Ok(Json(json!({ "imported": imported, "skipped": skipped, "journals_restored": journals_restored })))
 }
 
 pub(crate) async fn export_project(
+    State(state): State<AppState>,
     Json(body): Json<serde_json::Value>
 ) -> Response<Body> {
     let mut archive_buffer: Vec<u8> = Vec::new(); //готовим буфер куда туда сюда
@@ -207,11 +141,64 @@ pub(crate) async fn export_project(
         .append_data(&mut rules_header, "rules.json", rules_json.as_slice())
         .ok();
 
+    // Журналы: глобальный + per-capture (ключ — имя pcap, id при импорте новые).
+    let mut journal_count = 0u32;
+    let global_journal = crate::check::global_journal_path(&state.data_dir);
+    let mut has_global_journal = false;
+    if let Ok(bytes) = std::fs::read(&global_journal) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        tar_builder.append_data(&mut header, "journal_global.csv", bytes.as_slice()).ok();
+        has_global_journal = true;
+        journal_count += 1;
+    }
+    for cap in state.captures.read().unwrap().values() {
+        let src = crate::check::per_capture_journal_path(&state.data_dir, &cap.id);
+        if let Ok(bytes) = std::fs::read(&src) {
+            let safe_name: String = cap.file_name.replace(['/', '\\'], "_");
+            let entry = format!("journals/{}.journal.csv", safe_name);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            tar_builder.append_data(&mut header, entry.as_str(), bytes.as_slice()).ok();
+            journal_count += 1;
+        }
+    }
+
+    // Pcap записей: source.pcap каждой записи — иначе перенос проекта
+    // на другую машину не работает (фронт шлёт files:[] и путей не знает).
+    // Ключ — имя файла (импорт матчит журналы по нему же); дубли имён
+    // пропускаем, чтобы не перезаписать друг друга в архиве.
+    let mut pcap_names: Vec<String> = Vec::new();
+    let mut pcap_dupes = 0u32;
+    for cap in state.captures.read().unwrap().values() {
+        let safe_name: String = cap.file_name.replace(['/', '\\'], "_");
+        if pcap_names.iter().any(|n| n == &safe_name) {
+            pcap_dupes += 1;
+            continue;
+        }
+        let src = std::path::Path::new(&crate::state::capture_dir_in(&state.data_dir, &cap.id))
+            .join("source.pcap");
+        if let Ok(bytes) = std::fs::read(&src) {
+            let entry = format!("pcaps/{}", safe_name);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            tar_builder.append_data(&mut header, entry.as_str(), bytes.as_slice()).ok();
+            pcap_names.push(safe_name);
+        }
+    }
+
     // Какой то манифест проекта
     let manifest = json!({
         "project_name": body["project_name"].as_str().unwrap_or("unnamed"),
         "files": body["files"],
         "expected_at": chrono::Utc::now().to_rfc3339(),
+        "has_global_journal": has_global_journal,
+        "journal_count": journal_count,
+        "pcaps": pcap_names,
+        "pcap_duplicates_skipped": pcap_dupes,
     });
 
     let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap_or_default();

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "metadata": {
+    "exportedAt": "2026-10-16T03:02:03.005Z",
+    "author": null
+  },
+  "capture": {
+    "id": "759409e3-c62f-4702-9a17-050dca90858e",
+    "fileName": "07_checksum_offload.pcap",
+    "importedAt": "2026-10-16T03:01:15.674980177+00:00",
+    "sizeBytes": 4167,
+    "sessionCount": 1
+  },
+  "active": {
+    "modelId": "model-cdc961dd-cf38-47f4-8e81-605854ddd564",
+    "sessionId": "1e67a4a2-e4b2-477e-aaf2-fe7282262c27",
+    "messageId": null,
+    "fieldsSource": "json",
+    "messageModels": {},
+    "captureId": "759409e3-c62f-4702-9a17-050dca90858e"
+  },
+  "models": [
+    {
+      "id": "model-cdc961dd-cf38-47f4-8e81-605854ddd564",
+      "name": "Авто: 07_checksum_offload",
+      "status": "draft",
+      "rules": [
+        {
+          "id": "rule-e8ffe679-8c88-46b3-acb0-bd660c10c0db",
+          "name": "Распознанные опкоды",
+          "condition": {
+            "opcodes": [
+              0,
+              1,
+              8,
+              166
+            ]
+          },
+          "fields": [
+            {
+              "name": "opcode",
+              "type": "uint8",
+              "offset": 0,
+              "length": 1,
+              "note": "Опкод из списка: 0x00, 0x01, 0x08, 0xA6"
+            },
+            {
+              "name": "payload",
+              "type": "bytes",
+              "offset": 1,
+              "length": "rest"
+            }
+          ]
+        },
+        {
+          "id": "rule-072f3ee0-e669-4fb6-a6bc-1ba8d84be21e",
+          "name": "Неизвестный кадр",
+          "condition": {},
+          "fields": [
+            {
+              "name": "raw",
+              "type": "bytes",
+              "offset": 0,
+              "length": "rest",
+              "note": "Кадр без распознанной структуры"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-10-16T03:01:15.742Z"
+    }
+  ],
+  "observations": [],
+  "checkResult": null,
+  "captures": [
+    {
+      "id": "759409e3-c62f-4702-9a17-050dca90858e",
+      "fileName": "07_checksum_offload.pcap",
+      "importedAt": "2026-10-16T03:01:15.674980177+00:00",
+      "sizeBytes": 4167,
+      "sessionCount": 1
+    }
+  ]
+}

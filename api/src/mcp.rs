@@ -200,7 +200,7 @@ impl LabMcp {
             return Err(not_found("Запись"));
         }
         let actions: Vec<(crate::dto::Action, _, _)> =
-            crate::check::load_actions(&wanted, "fixtures/action_journal.csv");
+            crate::check::load_actions_for_capture(&self.state, &p.capture_id, &wanted).0;
         let out: Vec<crate::dto::Action> = actions.into_iter().map(|(a, _, _)| a).collect();
         Ok(CallToolResult::structured(serde_json::json!(out)))
     }

@@ -165,7 +165,16 @@ pub fn read_pcap_with(path: &Path, options: ReadOptions) -> Result<ReadResult, E
                 reader.consume(block_size);
             }
             Err(PcapError::Eof) => break,
-            Err(PcapError::Incomplete(_)) => break,
+            // Пакет не влез в 64-КиБ окно чтения — долить буфер и
+            // повторить, а не молча обрезать capture на полуслове.
+            Err(PcapError::Incomplete(_)) => match reader.refill() {
+                Ok(()) => continue,
+                Err(PcapError::Eof) => {
+                    diagnostics.truncated += 1;
+                    break;
+                }
+                Err(e) => return Err(Error::PcapParse(format!("{e:?}"))),
+            },
             Err(e) => return Err(Error::PcapParse(format!("{e:?}"))),
         }
     }

@@ -6,7 +6,6 @@ mod codegen;
 mod dto;
 mod error;
 mod field_types;
-mod flows;
 mod mcp;
 mod sandbox;
 mod infer;
@@ -20,6 +19,7 @@ mod state;
 mod status;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Router,
 };
@@ -125,22 +125,17 @@ async fn main() {
         .route("/api/v1/captures/:capture_id/sessions", get(captures::list_sessions))
         .route("/api/v1/captures/:capture_id/bytes", get(captures::get_bytes))
         .route("/api/v1/captures/:capture_id/actions", get(check::list_actions))
+        .route("/api/v1/captures/:capture_id/journal", post(check::upload_capture_journal))
+        .route("/api/v1/journal", post(check::upload_global_journal))
         .route("/api/v1/captures/:id", delete(captures::remove_capture))
         .route("/api/v1/sessions/:session_id/messages", get(messages::list_messages))
         .route("/api/v1/messages/:message_id/observations", get(messages::list_observations))
         .route("/api/v1/messages/:message_id/apply-model", post(models::apply_model))
         .route("/api/v1/observations", put(observations::save_observation))
         .route("/api/v1/observations/:id", delete(observations::remove_observation))
-        .route("/api/v1/check", post(check::check_model))
-        .route("/api/v1/models", get(models::list_models).put(models::save_model))
+        .route("/api/v1/check", post(check::check_model))        .route("/api/v1/models", get(models::list_models).put(models::save_model))
         .route("/api/v1/models/:model_id", delete(models::remove_model))
         .route("/api/v1/models/:model_id/codegen", get(codegen::codegen))
-        .route("/api/v1/projects", post(projects::create_project).get(projects::get_projects))
-        .route("/api/v1/projects/:id", get(projects::get_project))
-        .route("/api/v1/projects/:id/captures", post(projects::upload_capture))
-        .route("/api/v1/projects/:id/observations", post(observations::add_observation))
-        .route("/api/v1/flows/:session_id/bytes", post(flows::get_flow_bytes))
-        .route("/api/v1/interpret/apply", post(interpret::apply_interpretation))
         .route("/api/v1/verify/corpus", post(interpret::verify_corpus))
         .route("/api/v1/projects/import", post(projects::import_project))
         .route("/api/v1/projects/export", post(projects::export_project))
@@ -161,6 +156,10 @@ async fn main() {
                 Default::default(),
             ),
         )
+        // Лимит тела Axum по умолчанию — 2 МиБ: без этого multipart-импорт
+        // записей больше 2 МиБ рвался бы до наших проверок. Свой предел
+        // (200 МиБ, MAX_CAPTURE_BYTES) проверяется в ingest_packets.
+        .layer(DefaultBodyLimit::disable())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_token,

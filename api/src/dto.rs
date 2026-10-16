@@ -205,6 +205,15 @@ pub struct CheckSummary {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct JournalUploadResult {
+    pub actions: u32,
+    pub skipped: u32,
+    pub scope: String,
+    pub source: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CheckResult {
     pub rows: Vec<CheckRow>,
     pub summary: CheckSummary,

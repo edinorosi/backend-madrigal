@@ -7,202 +7,499 @@
   },
   "paths": {
     "/api/v1/healthz": {
-      "get": { "summary": "Проб готовности без токена (для ретраев скриптов и healthcheck)", "responses": { "200": { "description": "ok" } } }
+      "get": {
+        "summary": "Проб готовности без токена (для ретраев скриптов и healthcheck)",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
     },
     "/api/v1/version": {
-      "get": { "summary": "Версия сервера и протокола", "responses": { "200": { "description": "version" } } }
+      "get": {
+        "summary": "Версия сервера и протокола",
+        "responses": {
+          "200": {
+            "description": "version"
+          }
+        }
+      }
     },
     "/api/v1/openapi.json": {
-      "get": { "summary": "Эта спека", "responses": { "200": { "description": "openapi" } } }
+      "get": {
+        "summary": "Эта спека",
+        "responses": {
+          "200": {
+            "description": "openapi"
+          }
+        }
+      }
     },
     "/api/v1/captures": {
-      "get": { "summary": "Список записей", "responses": { "200": { "description": "Capture[]" } } },
+      "get": {
+        "summary": "Список записей",
+        "responses": {
+          "200": {
+            "description": "Capture[]"
+          }
+        }
+      },
       "post": {
         "summary": "Импорт PCAP (multipart field file)",
         "responses": {
-          "201": { "description": "Capture" },
-          "400": { "description": "Пустой файл / ошибка разбора" },
-          "500": { "description": "IO" }
+          "201": {
+            "description": "Capture"
+          },
+          "400": {
+            "description": "Пустой файл / ошибка разбора"
+          },
+          "413": {
+            "description": "Файл больше 200 МиБ (MAX_CAPTURE_BYTES)"
+          },
+          "500": {
+            "description": "IO"
+          }
         }
       }
     },
     "/api/v1/captures/{capture_id}/sessions": {
       "get": {
         "summary": "Сессии записи",
-        "parameters": [{ "name": "capture_id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Session[]" }, "404": { "description": "Capture not found" } }
+        "parameters": [
+          {
+            "name": "capture_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session[]"
+          },
+          "404": {
+            "description": "Capture not found"
+          }
+        }
       }
     },
     "/api/v1/captures/{capture_id}/bytes": {
       "get": {
         "summary": "Сырые байты потока записи (octet-stream)",
         "parameters": [
-          { "name": "capture_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "offset", "in": "query", "required": true, "schema": { "type": "integer" } },
-          { "name": "length", "in": "query", "required": true, "schema": { "type": "integer" } }
+          {
+            "name": "capture_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
         ],
-        "responses": { "200": { "description": "bytes" }, "400": { "description": "range" }, "404": { "description": "not found" } }
+        "responses": {
+          "200": {
+            "description": "bytes"
+          },
+          "400": {
+            "description": "range"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
       }
     },
     "/api/v1/captures/{capture_id}/actions": {
       "get": {
-        "summary": "Журнал действий (пусто [], если нет CSV/совпадений)",
-        "parameters": [{ "name": "capture_id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Action[]" } }
+        "summary": "Журнал действий (пусто [], если нет CSV/совпадений). Источник: per-capture > global > fixtures",
+        "parameters": [
+          {
+            "name": "capture_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Action[]"
+          }
+        }
+      }
+    },
+    "/api/v1/captures/{capture_id}/journal": {
+      "post": {
+        "summary": "Загрузка журнала CSV (multipart file + scope=capture|global, дефолт capture). Ответ: {actions, skipped, scope, source}",
+        "parameters": [
+          {
+            "name": "capture_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "JournalUploadResult"
+          },
+          "400": {
+            "description": "Пустой/битый CSV, нет колонок, больше 5 МиБ"
+          },
+          "404": {
+            "description": "Capture not found (scope=capture)"
+          }
+        }
+      }
+    },
+    "/api/v1/journal": {
+      "post": {
+        "summary": "Загрузка глобального журнала CSV (multipart file). Ответ: {actions, skipped, scope, source}",
+        "responses": {
+          "201": {
+            "description": "JournalUploadResult"
+          },
+          "400": {
+            "description": "Пустой/битый CSV, нет колонок, больше 5 МиБ"
+          }
+        }
       }
     },
     "/api/v1/captures/{id}": {
       "delete": {
         "summary": "Удалить запись (каскад + rm data/captures/{id})",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "204": { "description": "deleted" }, "404": { "description": "not found" } }
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "deleted"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
       }
     },
     "/api/v1/sessions/{session_id}/messages": {
       "get": {
         "summary": "Сообщения сессии; session_id — uuid",
         "parameters": [
-          { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "direction", "in": "query", "required": false, "schema": { "type": "string", "enum": ["request", "response"] } }
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "request",
+                "response"
+              ]
+            }
+          }
         ],
-        "responses": { "200": { "description": "Message[] (пусто при неизвестном id)" } }
+        "responses": {
+          "200": {
+            "description": "Message[] (пусто при неизвестном id)"
+          }
+        }
       }
     },
     "/api/v1/messages/{message_id}/observations": {
       "get": {
         "summary": "Наблюдения сообщения",
-        "parameters": [{ "name": "message_id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Observation[]" } }
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observation[]"
+          }
+        }
       }
     },
     "/api/v1/messages/{message_id}/apply-model": {
       "post": {
         "summary": "Применить модель к сообщению (body {modelId} camelCase; model_id тоже принимается)",
-        "parameters": [{ "name": "message_id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "MessageField[] (пусто при нет модели/сообщения)" } }
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "MessageField[] (пусто при нет модели/сообщения)"
+          }
+        }
       }
     },
     "/api/v1/observations": {
-      "put": { "summary": "Сохранить наблюдение (upsert по id, полный Observation camelCase)", "responses": { "204": { "description": "saved" } } }
+      "put": {
+        "summary": "Сохранить наблюдение (upsert по id, полный Observation camelCase)",
+        "responses": {
+          "204": {
+            "description": "saved"
+          }
+        }
+      }
     },
     "/api/v1/observations/{id}": {
       "delete": {
         "summary": "Удалить наблюдение",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "204": { "description": "deleted" }, "404": { "description": "not found" } }
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "deleted"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
       }
     },
     "/api/v1/check": {
       "post": {
         "summary": "Прогон модели по журналу. Принимает {capture_id, model_id} и {captureId, modelId}. last_check пишется только для известных записей",
-        "responses": { "200": { "description": "CheckResult" } }
+        "responses": {
+          "200": {
+            "description": "CheckResult"
+          }
+        }
       }
     },
     "/api/v1/models": {
-      "get": { "summary": "Список моделей", "responses": { "200": { "description": "Model[]" } } },
-      "put": { "summary": "Сохранить модель (upsert; updatedAt ставит сервер)", "responses": { "204": { "description": "saved" } } }
+      "get": {
+        "summary": "Список моделей",
+        "responses": {
+          "200": {
+            "description": "Model[]"
+          }
+        }
+      },
+      "put": {
+        "summary": "Сохранить модель (upsert; updatedAt ставит сервер)",
+        "responses": {
+          "204": {
+            "description": "saved"
+          }
+        }
+      }
     },
     "/api/v1/models/{model_id}": {
       "delete": {
         "summary": "Удалить модель",
-        "parameters": [{ "name": "model_id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "204": { "description": "deleted" }, "404": { "description": "not found" } }
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "deleted"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
       }
     },
     "/api/v1/models/{model_id}/codegen": {
       "get": {
         "summary": "Сгенерировать декодер из модели",
         "parameters": [
-          { "name": "model_id", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "lang", "in": "query", "required": false, "schema": { "type": "string", "enum": ["rust", "python", "py", "c"], "default": "rust" } }
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "rust",
+                "python",
+                "py",
+                "c"
+              ],
+              "default": "rust"
+            }
+          }
         ],
-        "responses": { "200": { "description": "{lang, filename, code}" }, "404": { "description": "Model not found" } }
-      }
-    },
-    "/api/v1/projects": {
-      "get": { "summary": "Список проектов (алиас над captures)", "responses": { "200": { "description": "{projects[]}" } } },
-      "post": { "summary": "Создать проект {name}", "responses": { "200": { "description": "{id, status}" } } }
-    },
-    "/api/v1/projects/{id}": {
-      "get": {
-        "summary": "Проект (возвращает Capture)",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Capture" }, "404": { "description": "not found" } }
-      }
-    },
-    "/api/v1/projects/{id}/captures": {
-      "post": {
-        "summary": "Загрузка pcap в проект с полным инжестом (сессии/сообщения создаются, старые чистятся; имя файла санитизируется)",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "{project_id, packets_found, sessions_found, saved_to}" }, "400": { "description": "bad file" }, "404": { "description": "project not found" } }
-      }
-    },
-    "/api/v1/projects/{id}/observations": {
-      "post": {
-        "summary": "ВНИМАНИЕ: :id здесь — message_id, не project_id",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "{status: saved}" } }
-      }
-    },
-    "/api/v1/flows/{session_id}/bytes": {
-      "post": {
-        "summary": "Чанки TCP-потока. ВНИМАНИЕ: :session_id — числовой ИНДЕКС сессии, не uuid. Принимает {file_path} и {filePath}; ошибки — честные 400/403/404",
-        "parameters": [{ "name": "session_id", "in": "path", "required": true, "schema": { "type": "integer" } }],
-        "responses": { "200": { "description": "{flow, chunks[]} или {error}" } }
-      }
-    },
-    "/api/v1/interpret/apply": {
-      "post": {
-        "summary": "Применить правило интерпретации. Принимает {file_path, session_id} и {filePath, sessionId} (индекс); ошибки — честные 400/403/404",
-        "responses": { "200": { "description": "{total_messages, results[]} или {error}" } }
+        "responses": {
+          "200": {
+            "description": "{lang, filename, code}"
+          },
+          "404": {
+            "description": "Model not found"
+          }
+        }
       }
     },
     "/api/v1/verify/corpus": {
       "post": {
         "summary": "Проверка на корпусе, SSE text/event-stream: текстовые data-строки прогресса + финальный JSON {type: done, ...}. Лимит 8 файлов",
-        "responses": { "200": { "description": "SSE stream; до spawn — 400 JSON {error}" } }
+        "responses": {
+          "200": {
+            "description": "SSE stream; до spawn — 400 JSON {error}"
+          }
+        }
       }
     },
     "/api/v1/projects/import": {
       "post": {
         "summary": "Импорт tar.gz (multipart field file)",
-        "responses": { "200": { "description": "{imported[], skipped}" }, "400": { "description": "bad archive" } }
+        "responses": {
+          "200": {
+            "description": "{imported[], skipped}"
+          },
+          "400": {
+            "description": "bad archive"
+          }
+        }
       }
     },
     "/api/v1/projects/export": {
       "post": {
         "summary": "Экспорт gzip {rules, project_name, files[]}. Пути вне jail пропускаются (в лог)",
-        "responses": { "200": { "description": "application/gzip" } }
+        "responses": {
+          "200": {
+            "description": "application/gzip"
+          }
+        }
       }
     },
     "/api/v1/report/generate": {
       "post": {
         "summary": "Markdown-отчёт по last_check. Принимает {project_name, capture_id} и {projectName, captureId}. 404 — JSON {error}",
-        "responses": { "200": { "description": "text/markdown" }, "404": { "description": "no check (JSON)" } }
+        "responses": {
+          "200": {
+            "description": "text/markdown"
+          },
+          "404": {
+            "description": "no check (JSON)"
+          }
+        }
       }
     },
     "/api/v1/analyze/autosuggest": {
       "post": {
         "summary": "Гипотезы разбора по всем сессиям (c2s-потоки клеятся). Принимает {file_path} и {filePath}; ошибки — честные 400/403/404",
-        "responses": { "200": { "description": "{file, total_bytes_analyzed, hypotheses[{type, confidence, reason, suggested_framing, pattern_id}]}" } }
+        "responses": {
+          "200": {
+            "description": "{file, total_bytes_analyzed, hypotheses[{type, confidence, reason, suggested_framing, pattern_id}]}"
+          }
+        }
       }
     },
     "/mcp": {
       "post": {
         "summary": "MCP-сервер (Streamable HTTP): initialize -> notifications/initialized -> tools/list, tools/call. Замок API_TOKEN действует. Инструменты: list_captures/sessions/messages, get_bytes (base64), actions, models (list/save/apply), check, infer_model, codegen, autosuggest, import_capture (base64), run_script. verify_corpus только по REST/SDK",
-        "responses": { "200": { "description": "SSE: data-строки JSON-RPC" }, "401": { "description": "без Bearer при заданном API_TOKEN" } }
+        "responses": {
+          "200": {
+            "description": "SSE: data-строки JSON-RPC"
+          },
+          "401": {
+            "description": "без Bearer при заданном API_TOKEN"
+          }
+        }
       }
     },
     "/api/v1/scripts/run": {
       "post": {
         "summary": "Прогон Python-скрипта на сервере (песочница --scripts-sandbox: bwrap без сети / rlimit / off). Body {script, capture_id?, timeout_ms?} (оба кейса); контекст в env LAB_CONTEXT + LAB_API_URL/LAB_API_TOKEN, рядом лежат client.py/lab.py. Ответ {stdout, stderr, exit_code, timed_out}",
-        "responses": { "200": { "description": "{stdout, stderr, exit_code, timed_out}" }, "400": { "description": "bad script" }, "502": { "description": "no python3" } }
+        "responses": {
+          "200": {
+            "description": "{stdout, stderr, exit_code, timed_out}"
+          },
+          "400": {
+            "description": "bad script"
+          },
+          "502": {
+            "description": "no python3"
+          }
+        }
       }
     },
     "/api/v1/analyze/fields": {
       "post": {
         "summary": "Вывод модели из журнала. Принимает {capture_id, journal_path} и {captureId, journalPath}. Модель НЕ сохраняется",
-        "responses": { "200": { "description": "{model, evidence, framing_used, samples, labeled, clusters}" }, "404": { "description": "not found" } }
+        "responses": {
+          "200": {
+            "description": "{model, evidence, framing_used, samples, labeled, clusters}"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
       }
     }
   }

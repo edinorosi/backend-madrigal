@@ -137,9 +137,6 @@ counterexamples[], journal[]}`. До старта — обычный `400 {"erro
 
 ## Ловушки (зафиксировано, чинить — отдельными задачами)
 
-- `POST /projects/:id/observations` — `:id` это `message_id`, не проект.
-- `POST /flows/:session_id/bytes` — `:session_id` числовой ИНДЕКС сессии
-  в pcap, не uuid (в отличие от `/sessions/:session_id/messages`).
 - `POST /check` пишет `last_check` только для известных записей.
 - Паттерны грузятся из `--patterns-dir` на каждый запрос анализа
   (рестарт не нужен); битый JSON скипается с именем файла в лог.

@@ -18,7 +18,18 @@ pub(crate) async fn list_captures(State(state): State<AppState>) -> Json<Vec<Cap
     Json(list)
 }
 
+/// Защитный предел размера записи: coverит и multipart-импорт, и импорт
+/// из архива (оба идут через ingest_packets). Совпадает с потолком фронта
+/// (200 МиБ): файл целиком держится в памяти при разборе.
+pub(crate) const MAX_CAPTURE_BYTES: usize = 200 * 1024 * 1024;
+
 pub(crate) fn ingest_packets(state: &AppState, file_name: String, file_bytes: Vec<u8>) -> Result<Capture, (StatusCode, Json<crate::dto::ErrorResponse>)> {
+    if file_bytes.len() > MAX_CAPTURE_BYTES {
+        return Err(api_error(
+            "Capture too large (max 200 MiB)",
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ));
+    }
     // парсим pcap во временный файл
     let temp_path = format!("/tmp/{}.pcap", Uuid::new_v4());
     std::fs::write(&temp_path, &file_bytes).map_err(|_| api_error("IO Error", StatusCode::INTERNAL_SERVER_ERROR))?;

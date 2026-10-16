@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde_json::json;
 
 use crate::dto::Observation;
 use crate::error::api_error;
@@ -38,25 +37,4 @@ pub(crate) async fn remove_observation(
     }
     persist_global(&state);
     Ok(StatusCode::NO_CONTENT)
-}
-
-
-
-pub(crate) async fn add_observation(
-    State(state): State<AppState>, 
-    AxumPath(message_id): AxumPath<String>, 
-    Json(mut body): Json<crate::dto::Observation>
-) -> Json<serde_json::Value> {
-    body.message_id = message_id;
-
-    if body.id.is_empty() {
-        body.id = uuid::Uuid::new_v4().to_string();
-    }
-    body.created_at = chrono::Utc::now().to_rfc3339();
-    
-    //реестр наблюдей
-    state.observations.write().unwrap().insert(body.id.clone(), body);
-    persist_global(&state);
-    
-    Json(json!({ "status": "saved" }))
 }

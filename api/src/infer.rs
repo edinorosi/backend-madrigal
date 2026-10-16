@@ -170,13 +170,16 @@ pub(crate) async fn infer_capture(
     let journal_raw = body
         .get("journal_path")
         .or_else(|| body.get("journalPath"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("fixtures/action_journal.csv");
-    let journal = match crate::error::jail_path(journal_raw) {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(e) => return Err(api_error(&e, StatusCode::BAD_REQUEST)),
+        .and_then(|v| v.as_str());
+    // Явный путь — как раньше через тюрьму путей; без него — загруженный
+    // журнал записи (per-capture > global > fixtures).
+    let actions = match journal_raw {
+        Some(raw) => match crate::error::jail_path(raw) {
+            Ok(p) => load_actions(&wanted_file, &p.to_string_lossy()),
+            Err(e) => return Err(api_error(&e, StatusCode::BAD_REQUEST)),
+        },
+        None => crate::check::load_actions_for_capture(state, capture_id, &wanted_file).0,
     };
-    let actions = load_actions(&wanted_file, &journal);
     let frames: Vec<(Vec<u8>, i64)> = samples.iter().map(|s| (s.bytes.clone(), s.ts_us)).collect();
     let labeled = label_frames(&frames, &actions);
     let labeled_count = labeled.iter().filter(|l| l.expected.is_some()).count();
